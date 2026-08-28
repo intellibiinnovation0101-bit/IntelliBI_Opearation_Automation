@@ -1,0 +1,26 @@
+# =============================================================================
+#  IntelliBI Operations Automation — Python dependencies
+#  Install on any machine with:   pip install -r requirements.txt
+#  (Python 3.10+ recommended.)
+# =============================================================================
+
+# Data handling / spreadsheets
+pandas>=2.0
+numpy>=1.24
+openpyxl>=3.1
+python-dateutil>=2.8
+gspread>=5.12
+
+# HTTP (Wise / Zoho APIs)
+requests>=2.31
+
+# Google Sheets / Drive (service-account auth)
+google-api-python-client>=2.100
+google-auth>=2.23
+google-auth-httplib2>=0.1.1
+
+# PDF report generation (Student Profile, Assignment Reminder)
+reportlab>=4.0
+
+# Centralized YAML configuration (config/config.yaml)
+PyYAML>=6.0

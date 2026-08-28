@@ -1,0 +1,63 @@
+# =============================================================================
+#  IntelliBI Operations Automation — central configuration
+#  ---------------------------------------------------------------------------
+#  ONE place for environment-specific settings. common/config_loader.py reads
+#  this file and maps the values onto the environment variables the pipeline
+#  scripts already honour — so you configure the project here without editing
+#  any Python.
+#
+#  * Paths may be relative (resolved inside the project) or absolute.
+#  * Leave a value blank to fall back to the script's built-in default.
+#  * SECRETS (service-account key, API keys, app passwords, Zoho tokens) are NOT
+#    stored here. They live in  credentials/  and are git-ignored.
+# =============================================================================
+
+google:
+  # Service-account key file. Relative names resolve inside credentials/.
+  service_account_file: service_account.json
+
+email:
+  # Operations sender identity is centralized in credentials/email_config.py
+  # (GMAIL_SENDER / GMAIL_APP_PASS for the primary Operations account, and
+  # GMAIL_SENDER_DIGITAL / GMAIL_APP_PASS_DIGITAL for the secondary account used
+  # by the Student Profile report). Per-report recipient / CC / BCC lists remain
+  # inside each report to preserve their exact existing behaviour (documented in
+  # the reference block at the bottom of this file).
+  primary_sender: info@intellibiinnovationstechnologies.in
+  # Completion-summary log e-mail sent by scripts/run_all.py:
+  send_log_summary: true
+  log_recipients:
+    - info@intellibiinnovationstechnologies.in
+  attach_layer_logs: true
+
+batch_planner:                       # pyBatchPlanner.py source workbooks
+  # Folder holding CourseAndTechnologiesMappingDocument.xlsx, TechnologyMappingDocuments.xlsx,
+  # IntellBIAttendance.xlsx, IntelliBIStudentInfo.xlsx. Default: data_inputs/.
+  base_dir: data_inputs
+
+pipeline:
+  stop_on_failure: true              # skip Layer-2 scripts whose Layer-1 dependencies failed
+  script_timeout_seconds: 7200       # per-script hard cap (2h); "" = no cap
+  max_parallel: 2                    # max scripts running at once per layer.
+                                     # Lower to 1 if you still hit Google Sheets 429
+                                     # "Read requests per minute per user" quota errors.
+  quota_retries: 2                   # auto-retry a script that FAILED only due to a
+                                     # Google API 429 / quota error (non-quota fails are not retried)
+  quota_retry_wait_seconds: 70       # wait before a quota retry (the per-minute quota resets)
+
+# -----------------------------------------------------------------------------
+#  Reference only — values that currently live inside the scripts (kept there to
+#  preserve exact behaviour). Documented here so you know where to change them.
+#
+#  Layer 1 (ops_data_collection)
+#    pyStudentPaymentClassesStudentEnrolled : IntelliBIStudentInfo  1Eq7Q3Gota7nYiaorm1L0NoouVfYtS7JkbBp4U5MWzVA
+#    pySessionAttendanceStudentTeacherFeedbacks : IntellBIAttendance 1TqDjq4gAyo32eRNMbuLd6uu0eCNZb7h1j5YH-q68AhU
+#    pyAssignmentSubmissions : IntelliBIAssessmentSubmission 1E_pOuZfw4BUhQ1bRMmuc8lPDDJRtoXuGkP-qtHC96HU (tab Submissions)
+#    pyZohoSignatureStatusRefresh : Zoho Sign India -> "Zoho Sign - Signers" sheet (creds in credentials/zoho_credentials.json)
+#
+#  Layer 2 (ops_reports_action)
+#    pyBatchPlanner : GDRIVE_FOLDER_ID 1goPKLAlbL-cEC8r9x7P0a4xAeg1pvDmN ; impersonate info@intellibiinnovationstechnologies.in
+#    pyAssignmentSubmissionEmailReminder : STAFF_SUMMARY_RECIPIENTS = [intellibihropsb2ch@gmail.com, info@intellibiinnovationstechnologies.in]
+#    pyStudentProfileReport : uses the DIGITAL Gmail sender (intellibidigital@gmail.com); admin master workbook e-mail
+#    Report SEND_EMAIL / recipients / CC / BCC live at the top of each report script.
+# -----------------------------------------------------------------------------

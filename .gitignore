@@ -1,0 +1,45 @@
+# =============================================================================
+#  IntelliBI Operations Automation — .gitignore
+#  Keeps SECRETS and machine-local artifacts out of version control.
+# =============================================================================
+
+# ── Secrets / credentials (NEVER commit) ─────────────────────────────────────
+credentials/*
+!credentials/README.md
+!credentials/*.example.json
+!credentials/*.example.py
+credentials/email_config.py
+credentials/wise_config.py
+
+# ── Local data inputs (Batch Planner source workbooks) ───────────────────────
+data_inputs/*
+!data_inputs/README.md
+!data_inputs/.gitkeep
+
+# ── Runtime working folders ──────────────────────────────────────────────────
+cache/
+temp/
+logs/
+output/reports/*
+output/exports/*
+!output/reports/.gitkeep
+!output/exports/.gitkeep
+
+# ── Generated report folders (e.g. StudentProgressReport_<Month>_<Year>/) ────
+output/StudentProgressReport_*/
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# ── OS / editor cruft ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+~$*
+*.log
+*.tmp

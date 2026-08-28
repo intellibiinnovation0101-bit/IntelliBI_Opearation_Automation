@@ -1,0 +1,13 @@
+# =============================================================================
+#  IntelliBI Sales Automation — logging configuration
+#  ---------------------------------------------------------------------------
+#  common/logging_utils.py reads the level below (env var SALES_LOG_LEVEL wins
+#  if set). Each script/runner writes to logs/<name>.log AND the console.
+#  Log-file locations are always derived from PROJECT_ROOT — never hard-coded.
+# =============================================================================
+
+level: INFO            # DEBUG | INFO | WARNING | ERROR
+date_format: "%Y-%m-%d %H:%M:%S"
+# Log files are appended across runs. Rotate/clear the logs/ folder from Task
+# Scheduler or a housekeeping job if it grows too large.
+retain_note: "logs/ is git-ignored; safe to delete old *.log files anytime."
