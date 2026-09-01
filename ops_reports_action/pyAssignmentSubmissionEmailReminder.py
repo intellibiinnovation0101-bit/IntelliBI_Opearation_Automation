@@ -2117,7 +2117,90 @@ def generate_overdue_report(subs_df, today: date,
 #  MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─── ONCE-PER-DAY GUARD ──────────────────────────────────────────────────────
+# Prevent multiple executions on the same day. A tiny marker file records the
+# date of the last SUCCESSFUL live run. On the next run:
+#   • if a successful live run already happened for that date → exit gracefully
+#     (no reprocessing, no duplicate emails, no record updates);
+#   • otherwise run normally and, only after the run completes without error,
+#     stamp the marker.
+# The marker is written ONLY for successful completions and ONLY in live mode,
+# so a failed run (exception) leaves no stamp and is retried on the next run,
+# and dry-run / no-email previews neither block nor stamp the day.
+_RUN_MARKER_NAME = "pyAssignmentSubmissionEmailReminder.lastsuccess"
+
+
+def _run_marker_path():
+    """Absolute path of the daily-completion marker file (in the project cache)."""
+    try:
+        base = PROJECT_CACHE_DIR
+    except NameError:
+        base = _SCRIPT_DIR
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        base = _SCRIPT_DIR
+    return os.path.join(base, _RUN_MARKER_NAME)
+
+
+def _already_ran_today(run_date) -> bool:
+    """True if the marker records a successful run for run_date (ISO date)."""
+    path = _run_marker_path()
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            first_line = fh.readline().strip()
+        return first_line == run_date.isoformat()
+    except Exception:
+        # If the marker is unreadable, do NOT block the run (fail open).
+        return False
+
+
+def _mark_ran_today(run_date) -> None:
+    """Stamp the marker with run_date after a successful live run."""
+    path = _run_marker_path()
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(run_date.isoformat() + "\n")
+            fh.write(f"Completed successfully at "
+                     f"{datetime.now():%Y-%m-%d %H:%M:%S}\n")
+    except Exception as e:
+        print(f"[DailyGuard] ⚠ Could not write run marker at {path} ({e}); "
+              f"duplicate-run protection may not persist for today.")
+
+
 def main():
+    """Once-per-day wrapper around the real work in _main_impl().
+
+    Skips a second successful LIVE run on the same day; always allows retries
+    after a failure and always allows dry-run / no-email previews.
+    """
+    # Resolve the effective run-date and mode the SAME way _main_impl() does.
+    run_date = (datetime.strptime(report_date, "%Y-%m-%d").date()
+                if report_date else date.today())
+    is_live = (not dry_run) and send_email  # live = actually sends / updates
+
+    if is_live and _already_ran_today(run_date):
+        print(f"\n[DailyGuard] A successful run for "
+              f"{run_date:%d-%b-%Y} has already completed today.")
+        print(f"[DailyGuard] Skipping to avoid duplicate reminder emails / "
+              f"record updates. Exiting gracefully.")
+        print(f"[DailyGuard] (Marker: {_run_marker_path()})")
+        return
+
+    # Run the real work. Any exception propagates out WITHOUT stamping the
+    # marker, so the failed day is retried on the next execution.
+    _main_impl()
+
+    # Reached only on successful completion — stamp the day (live runs only).
+    if is_live:
+        _mark_ran_today(run_date)
+        print(f"[DailyGuard] Marked {run_date:%d-%b-%Y} as completed "
+              f"(further runs today will be skipped).")
+
+
+def _main_impl():
     # ── Execution is controlled by the RUN CONFIGURATION variables at the top of
     #    this file, replacing the previous command-line arguments. They are
     #    gathered into a lightweight namespace so the logic below is unchanged.

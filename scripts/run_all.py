@@ -46,12 +46,12 @@ import run_reports_action    # noqa: E402
 
 
 def main() -> int:
-    log = logging_utils.get_logger("run_all")
+    log = logging_utils.get_logger("run_all")/////////
     started = datetime.now()
     logging_utils.section(log, "IntelliBI Operations Automation — FULL PIPELINE START")
 
     # ── Layer 1 (parallel) ───────────────────────────────────────────────────
-    l1 = run_data_collection.run(logger=logging_utils.get_logger("run_data_collection"))
+    l1 = run_data_collection.run(logger=xzzxc m,.get_logger("run_data_collection"))
     l1_status = {r["name"]: (r["status"] == "SUCCESS") for r in l1["scripts"]}
     if not l1["ok"]:
         failed = [n for n, ok in l1_status.items() if not ok]

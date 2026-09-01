@@ -56,9 +56,66 @@ from google.oauth2.service_account import Credentials
 import os
 import sys
 import re
+import time
+import random
 from datetime import datetime
 from difflib import SequenceMatcher
 from itertools import permutations
+
+
+# ─── TRANSIENT-ERROR RETRY (Google Sheets 429 / 5xx) ─────────────────────────
+def install_gspread_retry(max_retries=6, base_delay=2.0, max_delay=60.0):
+    """Make every gspread API call resilient to transient Google errors.
+
+    Google's Sheets/Drive backend intermittently returns HTTP 429 (rate limit)
+    or 5xx — 500 / 502 / 503 ('The service is currently unavailable') / 504.
+    These are temporary, server-side, and almost always succeed on retry. The
+    script previously had no retry, so a single such blip aborted the whole
+    'Student Additional Note' job. We patch gspread's low-level HTTP request so
+    EVERY call (open_by_key, get_all_values, batch_update, worksheets, …) retries
+    automatically with exponential backoff + jitter instead of failing the run.
+    """
+    RETRY_STATUS = {429, 500, 502, 503, 504}
+
+    # gspread >= 6 routes requests through http_client.HTTPClient.request;
+    # gspread 5.x routes through client.Client.request. Patch whichever exists.
+    try:
+        from gspread.http_client import HTTPClient as _Target
+    except Exception:  # pragma: no cover - older gspread
+        from gspread.client import Client as _Target
+
+    if getattr(_Target, "_intellibi_retry_installed", False):
+        return
+
+    _orig_request = _Target.request
+
+    def _request_with_retry(self, *args, **kwargs):
+        delay = base_delay
+        last_err = None
+        for attempt in range(max_retries + 1):
+            try:
+                return _orig_request(self, *args, **kwargs)
+            except gspread.exceptions.APIError as err:
+                status = None
+                try:
+                    status = err.response.status_code
+                except Exception:
+                    status = None
+                if status in RETRY_STATUS and attempt < max_retries:
+                    sleep_for = min(delay, max_delay) + random.uniform(0, 1)
+                    print(f"  ⚠ Google API {status} (transient) — retry "
+                          f"{attempt + 1}/{max_retries} in {sleep_for:.1f}s...")
+                    time.sleep(sleep_for)
+                    delay *= 2
+                    last_err = err
+                    continue
+                raise
+        if last_err:
+            raise last_err
+
+    _Target.request = _request_with_retry
+    _Target._intellibi_retry_installed = True
+
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -589,6 +646,10 @@ def _build_isrecordupdated_owner_map(dest_data, name_col, generated_col, iru_col
 
 def main():
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Starting IntelliBI data generation...")
+
+    # Make all Google Sheets calls resilient to transient 429/5xx (e.g. 503
+    # 'service currently unavailable') by retrying with exponential backoff.
+    install_gspread_retry()
 
     # Auth
     if not os.path.exists(CREDENTIALS_FILE):
