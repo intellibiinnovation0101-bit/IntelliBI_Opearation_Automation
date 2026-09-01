@@ -141,10 +141,52 @@ def load_credentials() -> dict:
         return json.load(fh)
 
 
+def _zoho_request(method, url, *, max_retries=4, base_delay=2.0, **kwargs):
+    """requests.request() with retry on transient network failures.
+
+    A single read timeout previously aborted the whole Zoho Sign refresh (and
+    cascaded into SKIPPING the downstream Admission Formalities report). We now
+    retry transient conditions — read/connect timeouts, connection drops, and
+    HTTP 429/500/502/503/504 — with exponential backoff, and re-raise the last
+    error only if every attempt fails. Non-transient HTTP responses (200, 4xx,
+    etc.) are returned UNCHANGED, so each caller's existing status handling
+    (raise_for_status / status_code checks / .json() / .text) behaves exactly
+    as before — this only adds resilience, it changes no successful-path logic.
+    """
+    RETRY_STATUS = {429, 500, 502, 503, 504}
+    delay = base_delay
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.request(method, url, **kwargs)
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError) as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                log.warning("Zoho %s %s — %s; retry %d/%d in %.1fs",
+                            method.upper(), url, type(exc).__name__,
+                            attempt + 1, max_retries, delay)
+                time.sleep(delay)
+                delay = min(delay * 2, 30)
+                continue
+            raise
+        if resp.status_code in RETRY_STATUS and attempt < max_retries:
+            log.warning("Zoho %s %s — HTTP %s (transient); retry %d/%d in %.1fs",
+                        method.upper(), url, resp.status_code,
+                        attempt + 1, max_retries, delay)
+            time.sleep(delay)
+            delay = min(delay * 2, 30)
+            continue
+        return resp
+    if last_exc:
+        raise last_exc
+
+
 def get_access_token(cred: dict) -> str:
     """Exchange the long-lived refresh token for a 1-hour access token."""
     dc = cred.get("data_center", "in")
-    resp = requests.post(
+    resp = _zoho_request(
+        "POST",
         f"https://accounts.zoho.{dc}/oauth/v2/token",
         params={
             "refresh_token": cred["refresh_token"],
@@ -189,7 +231,8 @@ def iter_requests(access_token: str, data_center: str):
             "sort_order":  "DESC",
         }
 
-        resp = requests.get(
+        resp = _zoho_request(
+            "GET",
             f"{base}/requests",
             headers=headers,
             params={"data": json.dumps({"page_context": page_context})},
@@ -216,8 +259,9 @@ def get_request_detail(access_token: str, data_center: str, request_id):
     if not request_id:
         return None
     url = f"https://sign.zoho.{data_center}/api/v1/requests/{request_id}"
-    r = requests.get(url, headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
-                     timeout=60)
+    r = _zoho_request("GET", url,
+                      headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
+                      timeout=60)
     if r.status_code != 200:
         log.warning("Detail fetch failed for %s: HTTP %s | %s",
                     request_id, r.status_code, r.text[:200])

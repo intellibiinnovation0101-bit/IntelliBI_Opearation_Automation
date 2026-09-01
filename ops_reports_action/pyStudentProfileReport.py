@@ -68,11 +68,14 @@ from paths import CREDENTIALS_DIR, CONFIG_DIR, LOGS_DIR, CACHE_DIR as PROJECT_CA
 
 import argparse
 import io
+import json
 import os
 import re
 import smtplib
 import sys
+import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
@@ -849,6 +852,38 @@ def load_live_profiles(service, hl_year: int, hl_month: int, month_label: str):
     s_join  = col(stu, "joined_on", "joinedon", "joining")
     s_active = col(stu, "is_active_student", "is_candidate_active", "is_active")
 
+    # ── Pre-index child tables by their join key ONCE ─────────────────────────
+    # Previously every student triggered a FULL-table scan of attendance,
+    # submissions and interviews — O(students × rows) — each rebuilding the same
+    # .astype(str)/.str.strip()/.str.lower() Series from scratch. Grouping each
+    # table by its join key a single time turns every per-student lookup into an
+    # O(1) dict fetch. groupby preserves original row order within each group, so
+    # each slice contains the EXACT same rows, in the same order, as the old
+    # boolean-mask filters — results are identical, only faster.
+    att_by_sid = {}
+    if att_sid:
+        for _k, _g in att.groupby(att[att_sid].astype(str), sort=False):
+            att_by_sid[str(_k)] = _g
+
+    _subs_empty = subs.iloc[0:0]
+    subs_by_email = {}
+    if sub_email and not subs.empty:
+        for _k, _g in subs.groupby(
+                subs[sub_email].astype(str).str.strip().str.lower(), sort=False):
+            subs_by_email[str(_k)] = _g
+
+    _itv_empty = itv.iloc[0:0]
+    itv_by_email, itv_by_cand = {}, {}
+    if not itv.empty:
+        if itv_email:
+            for _k, _g in itv.groupby(
+                    itv[itv_email].astype(str).str.strip().str.lower(), sort=False):
+                itv_by_email[str(_k)] = _g
+        if itv_cand:
+            for _k, _g in itv.groupby(
+                    itv[itv_cand].astype(str).str.strip().str.lower(), sort=False):
+                itv_by_cand[str(_k)] = _g
+
     profiles = []
     for _, srow in stu.iterrows():
         sid   = str(srow.get(s_id, "")) if s_id else ""
@@ -866,8 +901,8 @@ def load_live_profiles(service, hl_year: int, hl_month: int, month_label: str):
         )
 
         if att_sid and sid:
-            mine = att[att[att_sid].astype(str) == sid]
-            if not mine.empty:
+            mine = att_by_sid.get(sid)
+            if mine is not None and not mine.empty:
                 p.att_total_sessions = len(mine)
                 present_mask = mine[att_status].astype(str).str.lower().ne("absent") \
                     if att_status else (mine["_pct"] > 0)
@@ -906,7 +941,7 @@ def load_live_profiles(service, hl_year: int, hl_month: int, month_label: str):
                     p.att_courses.sort(key=lambda c: c.course.lower())
 
         if sub_email and email and not subs.empty:
-            mine = subs[subs[sub_email].astype(str).str.strip().str.lower() == email]
+            mine = subs_by_email.get(email, _subs_empty)
             p.asg_total = len(mine)
 
             def _is_sub(s):
@@ -939,9 +974,9 @@ def load_live_profiles(service, hl_year: int, hl_month: int, month_label: str):
                 ))
 
         if itv_email and email and not itv.empty:
-            mine = itv[itv[itv_email].astype(str).str.strip().str.lower() == email]
+            mine = itv_by_email.get(email, _itv_empty)
             if mine.empty and itv_cand and name:
-                mine = itv[itv[itv_cand].astype(str).str.strip().str.lower() == name.strip().lower()]
+                mine = itv_by_cand.get(name.strip().lower(), _itv_empty)
             p.itv_total = len(mine)
             scores, attended = [], 0
             no = 0
@@ -1134,7 +1169,7 @@ If any details look incorrect, please reply to this email.</p>
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(GMAIL_SENDER, GMAIL_APP_PASS)
         server.sendmail(GMAIL_SENDER, [to_email], msg.as_string())
-    print(f"   ↳ [Email] sent to {to_email}")
+    _emit(f"   ↳ [Email] sent to {to_email}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1389,6 +1424,196 @@ covering attendance, assignment submissions and interview performance across
 # ═════════════════════════════════════════════════════════════════════════════
 #  GOOGLE DRIVE UPLOAD
 # ═════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════
+#  PERFORMANCE — parallel per-student uploads + persistent Drive-ID cache
+# ═════════════════════════════════════════════════════════════════════════════
+#  The per-student loop makes several independent Google Drive round-trips
+#  (folder lookup, monthly upload, Till-Date upsert, permission share). Doing
+#  them one student at a time is network-bound and slow. We now (a) run students
+#  across a small thread pool so the network waits overlap, and (b) cache each
+#  student's Drive folder-id and Till-Date file-id to a small JSON so later runs
+#  skip the two lookup round-trips.
+#
+#  Behaviour is preserved EXACTLY: same files, same shares, same emails, same
+#  final counts, same log lines in the same order. Safety details:
+#    • each worker thread uses its OWN Drive client (httplib2 is not thread-safe);
+#    • email sends are serialised through a lock (Gmail-friendly, order-neutral);
+#    • every student's log lines (including those emitted inside the Drive
+#      helpers) are buffered per-student and printed in the original order;
+#    • a stale cached id is detected (HTTP 404) and the file/folder transparently
+#      recreated, so the outcome equals the uncached path.
+MAX_UPLOAD_WORKERS = 8
+
+_thread_local = threading.local()
+_email_lock   = threading.Lock()
+_cache_lock   = threading.Lock()
+_DRIVE_CACHE_PATH = os.path.join(PROJECT_CACHE_DIR or _SCRIPT_DIR,
+                                 "pyStudentProfileReport_drive_cache.json")
+_drive_id_cache = {"folders": {}, "till_files": {}}
+
+
+def _emit(msg):
+    """Thread-safe log sink: append to the current worker's buffer when one is
+    set (so each student's lines print together, in order), else print now."""
+    buf = getattr(_thread_local, "logbuf", None)
+    if buf is not None:
+        buf.append(msg)
+    else:
+        print(msg)
+
+
+def _http_status(exc):
+    """HTTP status code of a googleapiclient error, or None."""
+    resp = getattr(exc, "resp", None)
+    status = getattr(resp, "status", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _thread_drive():
+    """One Drive service per worker thread (never share a client across threads)."""
+    d = getattr(_thread_local, "drive", None)
+    if d is None:
+        d = _get_drive_service()
+        _thread_local.drive = d
+    return d
+
+
+def _load_drive_cache():
+    global _drive_id_cache
+    try:
+        with open(_DRIVE_CACHE_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            _drive_id_cache = {"folders": dict(data.get("folders") or {}),
+                               "till_files": dict(data.get("till_files") or {})}
+    except Exception:
+        _drive_id_cache = {"folders": {}, "till_files": {}}
+
+
+def _save_drive_cache():
+    try:
+        os.makedirs(os.path.dirname(_DRIVE_CACHE_PATH), exist_ok=True)
+        with _cache_lock:
+            snapshot = {"folders": dict(_drive_id_cache["folders"]),
+                        "till_files": dict(_drive_id_cache["till_files"])}
+        with open(_DRIVE_CACHE_PATH, "w", encoding="utf-8") as fh:
+            json.dump(snapshot, fh)
+    except Exception as e:
+        # The cache is a pure optimisation; never fail the run over it.
+        print(f"[Cache] ⚠ could not save Drive-ID cache: {e}")
+
+
+def _cached_folder_id(drive, parent_id, name):
+    """Folder id from cache (skips a files.list round-trip) or a real
+    get-or-create, remembering the result for next run."""
+    with _cache_lock:
+        cached = _drive_id_cache["folders"].get(name)
+    if cached:
+        return cached
+    fid = _drive_get_or_create_subfolder(drive, parent_id, name)
+    with _cache_lock:
+        _drive_id_cache["folders"][name] = fid
+    return fid
+
+
+def _cached_upsert_till(drive, folder_id, filename, data):
+    """Like _drive_upsert_file, but uses the cached file-id to update in place
+    without the files.list lookup. On a cache miss — or a stale id whose file was
+    removed (HTTP 404) — it falls back to the exact original upsert and then
+    remembers the id. Result is identical to _drive_upsert_file."""
+    from googleapiclient.http import MediaIoBaseUpload
+    key = f"{folder_id}/{filename}"
+    with _cache_lock:
+        cached_id = _drive_id_cache["till_files"].get(key)
+    if cached_id:
+        try:
+            media = MediaIoBaseUpload(io.BytesIO(data), mimetype="application/pdf",
+                                      resumable=False)
+            drive.files().update(fileId=cached_id, media_body=media,
+                                 supportsAllDrives=True).execute()
+            _emit(f"   ↳ [Drive] Till-Date PDF updated in place (id={cached_id}) — "
+                  f"permissions retained")
+            return cached_id
+        except Exception as e:
+            if _http_status(e) == 404:          # file removed → rebuild via slow path
+                with _cache_lock:
+                    _drive_id_cache["till_files"].pop(key, None)
+            else:
+                raise
+    fid = _drive_upsert_file(drive, folder_id, filename, data, "application/pdf")
+    with _cache_lock:
+        _drive_id_cache["till_files"][key] = fid
+    return fid
+
+
+class _FolderRef:
+    __slots__ = ("id",)
+
+    def __init__(self, fid):
+        self.id = fid
+
+
+def _with_folder_recovery(drive, folder_name, ref, op):
+    """Run op(folder_id). If it fails because a cached folder id is stale (the
+    folder was removed — HTTP 404), recreate the folder once, refresh the cache,
+    and retry so the outcome matches a fresh, uncached run. Any other error
+    propagates unchanged to the caller's existing handler."""
+    try:
+        return op(ref.id)
+    except Exception as e:
+        if _http_status(e) != 404:
+            raise
+        with _cache_lock:
+            _drive_id_cache["folders"].pop(folder_name, None)
+            for k in [k for k in _drive_id_cache["till_files"]
+                      if k.startswith(f"{ref.id}/")]:
+                _drive_id_cache["till_files"].pop(k, None)
+        new_id = _drive_get_or_create_subfolder(drive, DRIVE_ROOT_FOLDER_ID, folder_name)
+        with _cache_lock:
+            _drive_id_cache["folders"][folder_name] = new_id
+        ref.id = new_id
+        return op(new_id)
+
+
+def _student_uploads(drive, p, folder, folder_id, monthly_name, monthly_bytes,
+                     till_name, till_bytes, res):
+    """Monthly + Till-Date upload/share for one student — identical logic and
+    per-file error isolation to the original sequential block, with the Drive-ID
+    cache and 404 folder-recovery layered underneath."""
+    ref = _FolderRef(folder_id)
+    # Monthly — existing behaviour (replace the same-named file).
+    if monthly_name:
+        try:
+            _with_folder_recovery(drive, folder, ref, lambda fid:
+                _drive_upload_bytes(drive, fid, monthly_name, monthly_bytes,
+                                    "application/pdf"))
+            res["uploaded"] += 1
+        except Exception as e:
+            _emit(f"   ↳ [Drive] ⚠ upload failed for {monthly_name}: {e}")
+
+    # Till-Date — same switch on SHARE_TILL_DATE_REPORT_WITH_STUDENT as before.
+    try:
+        if SHARE_TILL_DATE_REPORT_WITH_STUDENT:
+            till_id = _with_folder_recovery(drive, folder, ref, lambda fid:
+                _cached_upsert_till(drive, fid, till_name, till_bytes))
+            res["uploaded"] += 1
+            if _drive_share_as_viewer(drive, till_id, p.email):
+                res["shared"] += 1
+            else:
+                res["share_skipped"] += 1
+        else:
+            _with_folder_recovery(drive, folder, ref, lambda fid:
+                _drive_upload_bytes(drive, fid, till_name, till_bytes,
+                                    "application/pdf"))
+            res["uploaded"] += 1
+    except Exception as e:
+        _emit(f"   ↳ [Drive] ⚠ Till-Date upload/share failed for "
+              f"{till_name}: {e}")
+
+
 def _get_drive_service():
     from googleapiclient.discovery import build
     from google.oauth2 import service_account
@@ -1457,13 +1682,13 @@ def _drive_upsert_file(drive, folder_id, filename, data, mimetype):
                 pass
         drive.files().update(fileId=file_id, media_body=media,
                              supportsAllDrives=True).execute()
-        print(f"   ↳ [Drive] Till-Date PDF updated in place (id={file_id}) — "
+        _emit(f"   ↳ [Drive] Till-Date PDF updated in place (id={file_id}) — "
               f"permissions retained")
         return file_id
     meta = {"name": filename, "parents": [folder_id]}
     up = drive.files().create(body=meta, media_body=media, fields="id",
                               supportsAllDrives=True).execute()
-    print(f"   ↳ [Drive] Till-Date PDF created (id={up['id']})")
+    _emit(f"   ↳ [Drive] Till-Date PDF created (id={up['id']})")
     return up["id"]
 
 
@@ -1474,7 +1699,7 @@ def _drive_share_as_viewer(drive, file_id, email):
     Missing/invalid email or any API error is logged and returns False."""
     email_n = str(email or "").strip()
     if not email_n or "@" not in email_n:
-        print(f"   ↳ [Share] ⚠ skipped — student email missing/invalid ({email!r})")
+        _emit(f"   ↳ [Share] ⚠ skipped — student email missing/invalid ({email!r})")
         return False
     try:
         perms = drive.permissions().list(
@@ -1482,7 +1707,7 @@ def _drive_share_as_viewer(drive, file_id, email):
             supportsAllDrives=True).execute().get("permissions", [])
         for pm in perms:
             if str(pm.get("emailAddress", "")).strip().lower() == email_n.lower():
-                print(f"   ↳ [Share] already shared with {email_n} "
+                _emit(f"   ↳ [Share] already shared with {email_n} "
                       f"(role={pm.get('role')}) — retained, no re-share needed")
                 return True
         drive.permissions().create(
@@ -1491,10 +1716,10 @@ def _drive_share_as_viewer(drive, file_id, email):
             sendNotificationEmail=False,
             supportsAllDrives=True,
             fields="id").execute()
-        print(f"   ↳ [Share] ✓ Till-Date PDF shared with {email_n} as Viewer")
+        _emit(f"   ↳ [Share] ✓ Till-Date PDF shared with {email_n} as Viewer")
         return True
     except Exception as e:
-        print(f"   ↳ [Share] ⚠ sharing failed for {email_n}: {e}")
+        _emit(f"   ↳ [Share] ⚠ sharing failed for {email_n}: {e}")
         return False
 
 
@@ -1613,19 +1838,30 @@ def main():
             drive = None
             print(f"[Drive] ⚠ Could not initialise Drive upload: {e}")
 
-    ok, fail, skipped, uploaded, emailed, shared, share_skipped = 0, 0, 0, 0, 0, 0, 0
-    for p in profiles:
+    # Persistent Drive-ID cache: load prior folder/file ids so this run can skip
+    # the per-student lookup round-trips (self-healing on any stale id).
+    _load_drive_cache()
+
+    def _process_student(p):
+        """Build + upload + (optionally) email one student's reports. Runs in a
+        worker thread; buffers its log lines and returns per-student counters so
+        the caller aggregates and prints them in the original order — identical
+        output to the old sequential loop."""
+        _thread_local.logbuf = []
+        res = {"ok": 0, "fail": 0, "skipped": 0, "uploaded": 0,
+               "emailed": 0, "shared": 0, "share_skipped": 0}
         try:
             folder = student_folder_name(p)
 
-            # Per-student Drive subfolder
+            # Per-student Drive subfolder (thread-local client + cached id)
+            drv = _thread_drive() if drive else None
             student_folder_id = None
-            if drive:
+            if drv:
                 try:
-                    student_folder_id = _drive_get_or_create_subfolder(
-                        drive, DRIVE_ROOT_FOLDER_ID, folder)
+                    student_folder_id = _cached_folder_id(
+                        drv, DRIVE_ROOT_FOLDER_ID, folder)
                 except Exception as e:
-                    print(f"   ↳ [Drive] ⚠ folder create failed for {folder}: {e}")
+                    _emit(f"   ↳ [Drive] ⚠ folder create failed for {folder}: {e}")
 
             monthly_bytes = monthly_name = None
 
@@ -1641,57 +1877,56 @@ def main():
             till_name = till_date_report_filename(p)
 
             names = ([monthly_name] if monthly_name else []) + [till_name]
-            print(f"• {folder}/  →  " + " | ".join(names))
+            _emit(f"• {folder}/  →  " + " | ".join(names))
 
-            if drive and student_folder_id:
-                # Monthly — existing behaviour (replace the same-named file).
-                if monthly_name:
-                    try:
-                        _drive_upload_bytes(drive, student_folder_id, monthly_name,
-                                            monthly_bytes, "application/pdf")
-                        uploaded += 1
-                    except Exception as e:
-                        print(f"   ↳ [Drive] ⚠ upload failed for {monthly_name}: {e}")
-
-                # Till-Date — controlled entirely by SHARE_TILL_DATE_REPORT_WITH_STUDENT:
-                #   ON  → update in place (keeps file id + the student's Viewer
-                #         permission across daily overwrites), then (re)share as Viewer.
-                #   OFF → upload exactly as before (replace same-named file); no share.
-                try:
-                    if SHARE_TILL_DATE_REPORT_WITH_STUDENT:
-                        till_id = _drive_upsert_file(drive, student_folder_id,
-                                                     till_name, till_bytes, "application/pdf")
-                        uploaded += 1
-                        if _drive_share_as_viewer(drive, till_id, p.email):
-                            shared += 1
-                        else:
-                            share_skipped += 1
-                    else:
-                        _drive_upload_bytes(drive, student_folder_id, till_name,
-                                            till_bytes, "application/pdf")
-                        uploaded += 1
-                except Exception as e:
-                    print(f"   ↳ [Drive] ⚠ Till-Date upload/share failed for "
-                          f"{till_name}: {e}")
+            if drv and student_folder_id:
+                _student_uploads(drv, p, folder, student_folder_id,
+                                 monthly_name, monthly_bytes,
+                                 till_name, till_bytes, res)
 
             # (3) Email the MONTHLY report (last day only, when generated).
             #     Failures are logged and never stop the remaining students.
+            #     SMTP is serialised via _email_lock to stay Gmail-friendly.
             if will_email and monthly_bytes is not None:
                 recipient = ADMIN_EMAIL if args.admin_only else p.email
                 if recipient and "@" in recipient:
                     try:
-                        send_student_report(recipient, p, monthly_bytes, monthly_name)
-                        emailed += 1
+                        with _email_lock:
+                            send_student_report(recipient, p, monthly_bytes, monthly_name)
+                        res["emailed"] += 1
                     except Exception as e:
-                        print(f"   ↳ [Email] ⚠ failed for {recipient}: {e}")
+                        _emit(f"   ↳ [Email] ⚠ failed for {recipient}: {e}")
                 else:
-                    skipped += 1
-                    print(f"   ↳ [skip] no valid email for {p.name}")
-            ok += 1
+                    res["skipped"] += 1
+                    _emit(f"   ↳ [skip] no valid email for {p.name}")
+            res["ok"] += 1
         except Exception as e:
-            fail += 1
-            print(f"   ✗ FAILED for {p.name}: {e}")
-            traceback.print_exc()
+            res["fail"] += 1
+            _emit(f"   ✗ FAILED for {p.name}: {e}")
+            _emit(traceback.format_exc().rstrip())
+        res["logs"] = _thread_local.logbuf
+        _thread_local.logbuf = None
+        return res
+
+    ok, fail, skipped, uploaded, emailed, shared, share_skipped = 0, 0, 0, 0, 0, 0, 0
+    if profiles:
+        _workers = max(1, min(MAX_UPLOAD_WORKERS, len(profiles)))
+        with ThreadPoolExecutor(max_workers=_workers) as _ex:
+            _results = list(_ex.map(_process_student, profiles))
+        # Aggregate + print in the ORIGINAL profile order (map preserves order).
+        for _res in _results:
+            for _line in _res["logs"]:
+                print(_line)
+            ok            += _res["ok"]
+            fail          += _res["fail"]
+            skipped       += _res["skipped"]
+            uploaded      += _res["uploaded"]
+            emailed       += _res["emailed"]
+            shared        += _res["shared"]
+            share_skipped += _res["share_skipped"]
+
+    # Persist any newly-learned folder/file ids for next run's fast path.
+    _save_drive_cache()
 
     print(f"\n✓ Done. {ok} student(s) processed, {fail} failed, "
           f"{uploaded} file(s) uploaded to Drive, {emailed} email(s) sent, "
