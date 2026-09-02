@@ -14,7 +14,8 @@
     4. Feedback Rating    — session-level feedback stats
 
   Usage:
-    Execution is controlled by the RUN CONFIGURATION variables near the top of
+    Execution is controlled by the RUN CONFIGURATION va
+    riables near the top of
     this file (report_type / report_date / start_date / end_date / send_email),
     then simply run:
 
