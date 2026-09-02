@@ -143,6 +143,28 @@ C_RECENT_TXT  = "5C6BC0"   # indigo-ish text for recent items
 #  BORDER / STYLE HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Performance: cached group-index for repeated equality filters ────────────
+# Report builders below filter a base DataFrame by a loop key many times, e.g.
+# subs_f[subs_f["assessment_id"] == aid] once per assignment — a full-column scan
+# every iteration (O(rows × keys)). _eq_group() computes a groupby index for a
+# (DataFrame, column) once, caches it, and turns each lookup into O(1). It returns
+# a fresh copy each call, exactly matching the copy semantics AND the row
+# content/order of boolean indexing (groupby preserves within-group order), so
+# results are identical — only faster. Only used for exact `== scalar` filters;
+# `.isin(...)` filters are left untouched (their row order would differ).
+_EQ_INDEX_CACHE = {}
+
+
+def _eq_group(df, col, key):
+    ck = (id(df), col)
+    ent = _EQ_INDEX_CACHE.get(ck)
+    if ent is None or ent[0] is not df:
+        ent = (df, {k: g for k, g in df.groupby(col, sort=False)})
+        _EQ_INDEX_CACHE[ck] = ent
+    g = ent[1].get(key)
+    return g.copy() if g is not None else df.iloc[0:0].copy()
+
+
 def _side(style="thin"):
     return Side(style=style, color=C_GREY_BD)
 
@@ -576,7 +598,7 @@ def build_assignment_summary(ws, assigned_f: pd.DataFrame, subs_f: pd.DataFrame,
             aid   = str(asgn.get("assessment_id", ""))
             # Compute submission stats from Submissions tab
             if not subs_f.empty and aid:
-                grp       = subs_f[subs_f["assessment_id"] == aid]
+                grp       = _eq_group(subs_f, "assessment_id", aid)
                 enrolled  = len(grp)
                 submitted = int((grp["submission_status"] != "Not Submitted").sum())
                 pending   = enrolled - submitted
@@ -975,7 +997,7 @@ def build_student_detail(ws, assigned_f: pd.DataFrame, subs_f: pd.DataFrame,
 
             # ── Student rows ──────────────────────────────────────────────────
             if not subs_f.empty:
-                grp = subs_f[subs_f["assessment_id"] == aid].copy()
+                grp = _eq_group(subs_f, "assessment_id", aid).copy()
                 # Sort: submitted/graded first, then not-submitted
                 grp["_sort"] = grp["submission_status"].apply(
                     lambda s: 0 if str(s).lower() != "not submitted" else 1

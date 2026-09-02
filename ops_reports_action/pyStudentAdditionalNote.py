@@ -247,6 +247,66 @@ def fuzzy_match(name, candidates):
     return best_match
 
 
+def _precompute_parts(candidates):
+    """[(candidate, first_part, last_part), …] for candidates with >= 2 parts,
+    in the original order (so fuzzy tie-breaking is unchanged). Built once by the
+    caller so the matching loops don't re-split every candidate on every row."""
+    out = []
+    for c in candidates:
+        cp = c.split()
+        if len(cp) >= 2:
+            out.append((c, cp[0], cp[-1]))
+    return out
+
+
+def _fuzzy_match_pre(name, precomputed_candidates):
+    """Faster equivalent of fuzzy_match() that returns the IDENTICAL candidate.
+
+    Speed comes only from avoiding repeated work, never from changing the rule:
+      • candidate first/last parts are precomputed once (see _precompute_parts);
+      • one SequenceMatcher per part is reused (same seq1=query orientation as
+        the original SequenceMatcher(None, name_part, cand_part));
+      • difflib's real_quick_ratio()/quick_ratio() are guaranteed UPPER BOUNDS
+        on ratio() (ratio ≤ quick_ratio ≤ real_quick_ratio), so a candidate that
+        fails them would also fail the >= FUZZY_THRESHOLD gate — skipping it
+        cannot change which candidates pass;
+      • the first-name score is checked before the last-name score is computed
+        (the original only used last_score when first_score already passed).
+    Candidate order and the strict >-best tie-break are preserved, so the chosen
+    match is exactly what fuzzy_match() would return."""
+    name_parts = name.split()
+    if len(name_parts) < 2:
+        return None
+    sm_first = SequenceMatcher()
+    sm_first.set_seq1(name_parts[0])
+    sm_last = SequenceMatcher()
+    sm_last.set_seq1(name_parts[-1])
+    best_score = 0
+    best_match = None
+    for cand, cf, cl in precomputed_candidates:
+        sm_first.set_seq2(cf)
+        if sm_first.real_quick_ratio() < FUZZY_THRESHOLD:
+            continue
+        if sm_first.quick_ratio() < FUZZY_THRESHOLD:
+            continue
+        first_score = sm_first.ratio()
+        if first_score < FUZZY_THRESHOLD:
+            continue
+        sm_last.set_seq2(cl)
+        if sm_last.real_quick_ratio() < FUZZY_THRESHOLD:
+            continue
+        if sm_last.quick_ratio() < FUZZY_THRESHOLD:
+            continue
+        last_score = sm_last.ratio()
+        if last_score < FUZZY_THRESHOLD:
+            continue
+        combined = (first_score + last_score) / 2
+        if combined > best_score:
+            best_score = combined
+            best_match = cand
+    return best_match
+
+
 def email_contains_name(email, name_parts):
     """Check if email prefix contains all parts of a name.
     e.g. 'nehakardile1125@gmail.com' contains 'neha' and 'kardile'
@@ -806,6 +866,13 @@ def main():
     matched = 0
     skipped = 0
 
+    # Precompute candidate name-parts ONCE for the two per-row fallbacks below
+    # (previously every unmatched student re-split every response name).
+    resp_fuzzy_parts = _precompute_parts(response_lookup.keys())
+    resp_email_parts = [(rn, rp, response_lookup[rn])
+                        for rn in response_lookup
+                        for rp in (rn.split(),) if len(rp) >= 2]
+
     for row_idx, row in enumerate(dest_data[1:], start=2):  # row_idx = sheet row (1-indexed)
         # Pad row if shorter than headers
         while len(row) < len(headers):
@@ -849,7 +916,7 @@ def main():
             match_type = "swapped"
         else:
             # Fuzzy match
-            fuzzy_result = fuzzy_match(name_key, response_lookup.keys())
+            fuzzy_result = _fuzzy_match_pre(name_key, resp_fuzzy_parts)
             if fuzzy_result:
                 resp_row = response_lookup[fuzzy_result]
                 match_type = f"fuzzy({fuzzy_result})"
@@ -858,9 +925,8 @@ def main():
                 # Handles married name changes (e.g. nehakardile@gmail -> Neha Kardile)
                 student_email = row[email_col].strip().lower()
                 if student_email:
-                    for resp_name, resp_data in response_lookup.items():
-                        resp_parts = resp_name.split()
-                        if len(resp_parts) >= 2 and email_contains_name(student_email, resp_parts):
+                    for resp_name, resp_parts, resp_data in resp_email_parts:
+                        if email_contains_name(student_email, resp_parts):
                             resp_row = resp_data
                             match_type = f"email({resp_name})"
                             break
@@ -921,6 +987,12 @@ def main():
                 if ne:
                     dest_emails_exact.add(ne)
 
+    # Precompute ONCE for the unmatched-source scan below (was re-splitting all
+    # destination names and re-cleaning all destination emails per source name).
+    dest_fuzzy_parts = _precompute_parts(dest_names_list)
+    dest_email_prefixes = [re.sub(r'[^a-z]', '', e.split('@')[0].lower())
+                           for e in dest_emails if '@' in e]
+
     unmatched_source = []
     for name in response_lookup:
         # Exact-email match takes precedence — if this source response's email
@@ -939,14 +1011,15 @@ def main():
         if first_last and first_last in dest_names:
             continue
         # Check fuzzy
-        fuzzy_result = fuzzy_match(name, dest_names_list)
+        fuzzy_result = _fuzzy_match_pre(name, dest_fuzzy_parts)
         if fuzzy_result:
             continue
-        # Check email-based match
+        # Check email-based match (dest email prefixes precomputed above; a prefix
+        # with no '@' never matched in email_contains_name, so it is excluded).
         email_matched = False
         if len(parts) >= 2:
-            for email in dest_emails:
-                if email_contains_name(email, parts):
+            for pref in dest_email_prefixes:
+                if all(part in pref for part in parts):
                     email_matched = True
                     break
         if email_matched:

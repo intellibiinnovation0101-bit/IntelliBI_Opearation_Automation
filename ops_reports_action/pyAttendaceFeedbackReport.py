@@ -154,6 +154,28 @@ KPI_RED    = ("B71C1C", "FFCDD2", "B71C1C")
 KPI_AMBER  = ("E65100", "FFF3E0", "BF360C")
 
 
+# ── Performance: cached group-index for repeated equality filters ────────────
+# Several builders filter a base DataFrame by a loop key many times, e.g.
+# _eq_group(att_f, "session_id", sid) once per session — a full-column scan every
+# iteration (O(rows × keys)). _eq_group() computes a groupby index for a
+# (DataFrame, column) once, caches it, and turns each lookup into O(1). It returns
+# a fresh copy each call, exactly matching the copy semantics AND the row
+# content/order of boolean indexing (groupby preserves within-group order), so
+# results are identical — only faster. Only used for exact `== scalar` filters;
+# `.isin(...)` and `.str.strip() ==` filters are left untouched.
+_EQ_INDEX_CACHE = {}
+
+
+def _eq_group(df, col, key):
+    ck = (id(df), col)
+    ent = _EQ_INDEX_CACHE.get(ck)
+    if ent is None or ent[0] is not df:
+        ent = (df, {k: g for k, g in df.groupby(col, sort=False)})
+        _EQ_INDEX_CACHE[ck] = ent
+    g = ent[1].get(key)
+    return g.copy() if g is not None else df.iloc[0:0].copy()
+
+
 def _side(style="thin"):
     return Side(style=style, color=C_GREY_BD)
 
@@ -800,7 +822,7 @@ def build_session_summary(ws, sess_f: pd.DataFrame, att_f: pd.DataFrame,
         # ── Per-session rows ──────────────────────────────────────────────────
         for _, sess in sess_f.iterrows():
             sid         = sess.get("session_id", "")
-            sa          = att_f[att_f["session_id"] == sid]
+            sa          = _eq_group(att_f, "session_id", sid)
             sa_app      = _applicable(sa)                 # applicable-only for Present/Absent/Att%
             na_cnt      = _na_count(sa)                   # attendance-N/A students
             present     = sa_app[sa_app["status"] == "Present"]
@@ -1590,9 +1612,9 @@ def build_feedback_rating(ws, sess_f: pd.DataFrame, att_f: pd.DataFrame,
     if is_daily:
         for _, sess in sess_f.iterrows():
             sid      = sess.get("session_id", "")
-            sa       = att_f[att_f["session_id"] == sid]
+            sa       = _eq_group(att_f, "session_id", sid)
             sa_app   = _applicable(sa)                    # applicable-only for Present
-            sf       = _dedup_fb(fb_f[fb_f["session_id"] == sid] if not fb_f.empty else pd.DataFrame())
+            sf       = _dedup_fb(_eq_group(fb_f, "session_id", sid) if not fb_f.empty else pd.DataFrame())
             n_stu    = len(sa)                            # Total Enrolled (all)
             n_present = int((sa_app["status"] == "Present").sum())   # Total Present (applicable)
             n_fb     = len(sf)
@@ -1801,7 +1823,7 @@ def build_teacher_no_feedback(ws, sess_f: pd.DataFrame, tf_f: pd.DataFrame,
 
             # ── Detect cancelled / scheduled (same logic as Session_Summary) ──
             dur_min = _session_dur_min(r)
-            sa_count = len(att_f[att_f["session_id"] == sid]) if not att_f.empty and "session_id" in att_f.columns else 0
+            sa_count = len(_eq_group(att_f, "session_id", sid)) if not att_f.empty and "session_id" in att_f.columns else 0
             _end_raw   = str(r.get("end_time_ist", "")).strip()
             _end_blank = _end_raw in ("", "nan", "NaT", "None", "NAN")
             _has_attendance = sa_count > 0
@@ -2109,7 +2131,7 @@ def _avg_dur_for_group(sess_grp: pd.DataFrame, att_f: pd.DataFrame) -> float:
     durs = []
     for _, sr in sess_grp.iterrows():
         sid = sr.get("session_id", "")
-        sa  = att_f[att_f["session_id"] == sid] if sid else pd.DataFrame()
+        sa  = _eq_group(att_f, "session_id", sid) if sid else pd.DataFrame()
         d   = _session_dur_min(sr)
         if d <= 0 and not sa.empty and "_dur_min" in sa.columns:
             mx = sa["_dur_min"].max()
@@ -2155,7 +2177,7 @@ def _build_daily_ss_trend(sess_f: pd.DataFrame, att_f: pd.DataFrame) -> dict:
         ct  = sess.get("course_title", "")
         tn  = sess.get("tutor_name",  "")
         sid = sess.get("session_id",  "")
-        sa  = att_f[att_f["session_id"] == sid]
+        sa  = _eq_group(att_f, "session_id", sid)
         pct = round(len(sa[sa["status"] == "Present"]) / len(sa) * 100, 1) if len(sa) else 0.0
         key = (cn, ct, tn)
         result[key] = round((result[key] + pct) / 2, 1) if key in result else pct
@@ -2175,7 +2197,7 @@ def _build_daily_fb_trend(sess_f: pd.DataFrame, fb_f: pd.DataFrame) -> dict:
         ct  = sess.get("course_title", "")
         tn  = sess.get("tutor_name",  "")
         sid = sess.get("session_id",  "")
-        sf  = fb_f[fb_f["session_id"] == sid] if not fb_f.empty else pd.DataFrame()
+        sf  = _eq_group(fb_f, "session_id", sid) if not fb_f.empty else pd.DataFrame()
         if not sf.empty and "_rating" in sf.columns:
             ratings = sf["_rating"].dropna().tolist()
             if ratings:
