@@ -1,6 +1,6 @@
 """
 ================================================================================
-  IntelliBI Attendance & Feedback Report Generator
+  IntelliBI Attendance & Feedback Report Generator#
   Reads live data from Google Sheets → Builds styled Excel report → Emails via Gmail
 
   Sheets read:

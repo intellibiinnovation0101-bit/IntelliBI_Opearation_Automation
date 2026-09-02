@@ -1,8 +1,0 @@
-# ================= OPERATIONS =================
-cd "C:\Users\pc\PycharmProjects\IntelliBI_Operations_Automation"
-Remove-Item .git\index.lock -Force -ErrorAction SilentlyContinue
-git restore .
-git fetch origin --prune
-git checkout dev  ; git pull --ff-only origin dev
-git checkout main ; git pull --ff-only origin main
-git checkout prod ; git pull --ff-only origin prod
