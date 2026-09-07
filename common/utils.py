@@ -484,6 +484,16 @@ def upsert_rows(
         f"Updated: {updated_count} | Appended: {appended_count} | Skipped (unchanged): {skipped_count}"
     )
 
+    # Return the per-run counts so callers can build a reconciled accounting
+    # summary. Additive only — existing callers that ignore the return value are
+    # unaffected (behaviour is unchanged).
+    return {
+        "inserted":      appended_count,
+        "updated":       updated_count,
+        "unchanged":     skipped_count,
+        "batch_deduped": removed,
+    }
+
 
 def overwrite_rows(service, spreadsheet_id: str, tab_name: str, columns: list, rows: list):
     """

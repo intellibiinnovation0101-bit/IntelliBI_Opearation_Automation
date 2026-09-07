@@ -1,0 +1,140 @@
+{
+  "_metadata": {
+    "description": "Old instructor-to-technology mapping for IntelliBI (legacy reference data: which technologies each instructor was mapped to).",
+    "source": "old_Instructor_technology Mapping document",
+    "generated_on": "2026-06-14",
+    "notes": "Two exact duplicate source rows (Kumar Aradhya, Pratik Shah) were removed. Technology names are preserved verbatim from the source, including original spellings (e.g. 'Pyspak', 'Tablaeu', 'Chat Gpt', 'Advance Azure').",
+    "counts": {
+      "instructors": 8
+    }
+  },
+  "instructor_technologies": [
+    {
+      "name": "Kumar Aradhya",
+      "technologies": [
+        "PowerBI",
+        "Chat Gpt",
+        "Tablaeu"
+      ]
+    },
+    {
+      "name": "Pratik Shah",
+      "technologies": [
+        "SQL",
+        "Python",
+        "Pyspak"
+      ]
+    },
+    {
+      "name": "Chetan Garad",
+      "technologies": [
+        "Advance Azure"
+      ]
+    },
+    {
+      "name": "Sumit Chatterji",
+      "technologies": [
+        "Advance Excel and R"
+      ]
+    },
+    {
+      "name": "Raj Shriniwas",
+      "technologies": [
+        "Azure"
+      ]
+    },
+    {
+      "name": "Pratik Nerkar",
+      "technologies": [
+        "SQL",
+        "Python"
+      ]
+    },
+    {
+      "name": "Kushal Mandge",
+      "technologies": [
+        "SQL",
+        "Python"
+      ]
+    },
+    {
+      "name": "Aman Pathak",
+      "technologies": [
+        "Azure"
+      ]
+    },
+	    {
+      "name": "Vishal Sanap",
+      "technologies": [
+        "Power BI",
+		"SQL"
+      ]
+    },
+	{
+      "name": "Vaibhav Bhagat",
+      "technologies": [
+        "Python",
+		"SQL",
+		"PySpark",
+		"Databricks",
+		"Azure Services"
+		
+      ]
+    },
+	{
+	"name": "Rahul Gawade",
+      "technologies": [
+        "Business Communication"
+      ]
+    },
+		{
+	"name": "Mayuresh Bharmoria",
+      "technologies": [
+        "Azure"
+      ]
+    },
+	{
+	  "name": "Sachin Galugade",
+      "technologies": [
+        "Azure"
+      ]
+    },
+	{
+	  "name": "Sumit Chobe",
+      "technologies": [
+        "Azure Projects"
+      ]
+    },
+	{
+	  "name": "Ramprakash",
+      "technologies": [
+        "Data Science"
+      ]
+    },
+		{
+	  "name": "Ramprakash",
+      "technologies": [
+        "Data Science"
+      ]
+    },
+	{
+	  "name": "Nishant J",
+      "technologies": [
+        "Data Science"
+      ]
+    },
+	{
+	  "name": "Akash Gomase",
+      "technologies": [
+        "Data Science"
+      ]
+    },
+	{
+	  "name": "Unknown",
+      "technologies": [
+        "Details Not Available"
+      ]
+    }
+
+  ]
+}

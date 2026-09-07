@@ -46,6 +46,7 @@ TITLES = {
     "pyStudentProfileReport": "Student Profile Reports",
     "pyAdmissionFormalitiesReport": "Admission Formalities Report",
     "pyStudentAdditionalNote": "Student Additional Note",
+    "pyWiseDataValidationReport": "Wise Data Validation Report",
     # ── Sales ───────────────────────────────────────────────────────────────
     "pyInteraktUsers": "Interakt WhatsApp Users",
     "pyExotelInboxScrape": "Exotel Inbox Scrape",
@@ -134,6 +135,14 @@ _R = {
         {"k": "last", "label": "Updated", "re": r"Records Updated\s*:\s*(\d+)"},
         {"k": "last", "label": "Unchanged", "re": r"Records Skipped \(No Changes\)\s*:\s*(\d+)"},
         {"k": "last", "label": "Failed", "re": r"Records Failed\s*:\s*(\d+)"},
+    ],
+    "pyWiseDataValidationReport": [
+        {"k": "last", "label": "Student records flagged",
+         "re": r"\[Validate\]\s*Students\s*->[^\n]*invalid=(\d+)", "zero": "keep"},
+        {"k": "last", "label": "Course records flagged",
+         "re": r"\[Validate\]\s*Courses\s*->[^\n]*invalid=(\d+)", "zero": "keep"},
+        {"k": "last", "label": "Instructor records flagged",
+         "re": r"\[Validate\]\s*Instructors\s*->[^\n]*invalid=(\d+)", "zero": "keep"},
     ],
     # ── Sales ───────────────────────────────────────────────────────────────
     "pyInteraktUsers": [

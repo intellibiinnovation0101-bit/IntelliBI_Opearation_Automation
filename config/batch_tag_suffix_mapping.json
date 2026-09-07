@@ -1,0 +1,15 @@
+{
+  "_metadata": {
+    "description": "Allowed optional batch-tag suffix segments for IntelliBI student Tag Names. A student Tag Name follows the pattern <ShortCode><MMYY><OptionalSegment> (e.g. 'DE0626E', 'AZ0926Free'). When an optional segment is present it must be one of the keys below; otherwise the Tag Name is flagged Invalid.",
+    "generated_on": "2026-06-14",
+    "format": "<ShortCode><MMYY><OptionalSegment>",
+    "examples": ["DE0626E", "AZ0926Free"]
+  },
+  "suffix_mapping": {
+    "E": "Evening",
+	"M": "Morning",
+    "FS": "Free Students",
+	"DS": "Dummy Student",
+	"DF": "Dummy Faculty"
+  }
+}

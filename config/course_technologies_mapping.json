@@ -1,0 +1,266 @@
+{
+  "_metadata": {
+    "description": "Course and technologies mapping for IntelliBI programs. Lists each course (by short code and full Wise course name), whether it is an active course, and its technology sequence.",
+    "source_file": "CourseAndTechnologiesMappingDocument.csv",
+    "generated_on": "2026-06-13",
+    "record_count": 12
+  },
+  "courses": [
+    {
+      "short_code": "GenAI",
+      "course_name": "Artificial Intelligence (AI) with Generative AI + Agentic AI + Machine",
+      "is_course": true,
+      "is_active": true,
+      "technologies": [
+        "SQL",
+        "Python",
+        "Generative AI",
+        "Agentic AI",
+        "Machine Learning (ML)"
+      ],
+      "wise_course_name_note": "(Generative AI | Agentic AI | Machine Learning (ML)) = AI (GenAI • Agentic AI • ML)",
+	  "is_course_mmyy_required":"Y"
+    },
+    {
+      "short_code": "ADE",
+      "course_name": "Azure Data Engineering",
+      "is_course": true,
+      "is_active": true,
+      "technologies": [
+        "SQL",
+        "Python",
+        "PySpark",
+        "Databricks",
+        "Azure Data Factory",
+        "Azure Synapse",
+        "Azure Services",
+        "Data Warehouse"
+      ],
+      "wise_course_name_note": "(Azure Data Factory | Azure Synapse | Azure Services) = Azure Services",
+	  "is_course_mmyy_required":"Y"
+    },
+    {
+      "short_code": "DAAI",
+      "course_name": "Data Analytics with AI",
+      "is_course": true,
+      "is_active": true,
+      "technologies": [
+        "SQL",
+        "Python",
+        "Power BI",
+        "Tableau",
+        "Data Warehouse",
+        "Advanced Excel",
+        "R Overview",
+        "AI for Data Analytics"
+      ],
+      "wise_course_name_note": "(Advanced Excel | R Overview) = Advanced Excel | R",
+	  "is_course_mmyy_required":"Y"
+    },
+    {
+      "short_code": "DA",
+      "course_name": "Data Analytics",
+      "is_course": true,
+      "is_active": true,
+      "technologies": [
+        "SQL",
+        "Python",
+        "Power BI",
+        "Tableau",
+        "Data Warehouse",
+        "Advanced Excel",
+        "R Overview"
+      ],
+      "wise_course_name_note": "(Advanced Excel | R Overview) = Advanced Excel | R",
+	  "is_course_mmyy_required":"Y"
+    },
+    {
+      "short_code": "AADE",
+      "course_name": "Azure AWS Data Engineering",
+      "is_course": true,
+      "is_active": true,
+      "technologies": [
+        "SQL",
+        "Python",
+        "PySpark",
+        "Databricks",
+        "AWS",
+        "Azure Data Factory",
+        "Azure Synapse",
+        "Azure Services",
+        "Data Warehouse"
+      ],
+      "wise_course_name_note": "(Azure Data Factory | Azure Synapse | Azure Services) = Azure Services",
+	  "is_course_mmyy_required":"Y"
+    },
+    {
+      "short_code": "ADEBI",
+      "course_name": "Azure Data Engineering with Power BI",
+      "is_course": true,
+      "is_active": true,
+      "technologies": [
+        "SQL",
+        "Python",
+        "Power BI",
+        "PySpark",
+        "Databricks",
+        "Azure Data Factory",
+        "Azure Synapse",
+        "Azure Services",
+        "Data Warehouse"
+      ],
+      "wise_course_name_note": "(Azure Data Factory | Azure Synapse | Azure Services) = Azure Services",
+	  "is_course_mmyy_required":"Y"
+    },
+    {
+      "short_code": "ADEAI",
+      "course_name": "Azure Data Engineering with GenAI & Agentic AI",
+      "is_course": true,
+      "is_active": true,
+      "technologies": [
+        "SQL",
+        "Python",
+        "PySpark",
+        "Databricks",
+        "Azure Data Factory",
+        "Azure Synapse",
+        "Azure Services",
+        "Data Warehouse",
+        "AI for Data Engineers"
+      ],
+      "wise_course_name_note": "(Azure Data Factory | Azure Synapse | Azure Services) = Azure Services",
+	  "is_course_mmyy_required":"Y"
+    },
+	{
+      "short_code": "ADEBIAI",
+      "course_name": "Azure Data Engineering with GenAI & Agentic AI",
+      "is_course": true,
+      "is_active": true,
+      "technologies": [
+        "SQL",
+        "Python",
+		"Power BI",
+        "PySpark",
+        "Databricks",
+        "Azure Data Factory",
+        "Azure Synapse",
+        "Azure Services",
+        "Data Warehouse",
+        "AI for Data Engineers"
+      ],
+      "wise_course_name_note": "(Azure Data Factory | Azure Synapse | Azure Services) = Azure Services",
+	  "is_course_mmyy_required":"Y"
+    },
+    {
+      "short_code": "ADA",
+      "course_name": "Advanced Data Analyst",
+      "is_course": true,
+      "is_active": false,
+      "technologies": [
+        "SQL",
+        "Python",
+        "Power BI",
+        "PySpark",
+        "Databricks",
+        "Azure Data Factory",
+        "Azure Synapse",
+        "Azure Services",
+        "Data Warehouse"
+      ],
+      "wise_course_name_note": "(Azure Data Factory | Azure Synapse | Azure Services) = Azure Services",
+	  "is_course_mmyy_required":"Y"
+    },
+    {
+      "short_code": "AWS",
+      "course_name": "AWS Data Engineering",
+      "is_course": true,
+      "is_active": false,
+      "technologies": [
+        "SQL",
+        "Python",
+        "PySpark",
+        "AWS",
+        "Data Warehouse"
+      ],
+      "wise_course_name_note": "",
+	  "is_course_mmyy_required":"Y"
+    },
+    {
+      "short_code": "DS",
+      "course_name": "Data Science",
+      "is_course": true,
+      "is_active": false,
+      "technologies": [
+        "SQL",
+        "Python",
+        "Machine Learning (ML)",
+        "Data Science"
+      ],
+      "wise_course_name_note": "",
+	  "is_course_mmyy_required":"Y"
+    },
+    {
+      "short_code": "GCP",
+      "course_name": "Google Data Engineering",
+      "is_course": true,
+      "is_active": false,
+      "technologies": [
+        "SQL",
+        "Python",
+        "PySpark",
+        "GoogleBigQuery",
+        "Data Fusion",
+        "Data Warehouse"
+      ],
+      "wise_course_name_note": "",
+	  "is_course_mmyy_required":"Y"
+    },
+	    {
+      "short_code": "AADEBI",
+      "course_name": "Azure AWS Data Engineering wth Power BI",
+      "is_course": true,
+      "is_active": true,
+      "technologies": [
+        "SQL",
+        "Python",
+		"Power BI",
+        "PySpark",
+        "Databricks",
+        "AWS",
+        "Azure Data Factory",
+        "Azure Synapse",
+        "Azure Services",
+        "Data Warehouse"
+      ],
+      "wise_course_name_note": "",
+	  "is_course_mmyy_required":"Y"
+    },
+    {
+      "short_code": "DF",
+      "course_name": "Dummy Faculty",
+      "is_course": false,
+      "is_active": true,
+      "technologies": [],
+      "wise_course_name_note": "",
+	  "is_course_mmyy_required":"N"
+    },
+    {
+      "short_code": "DS",
+      "course_name": "Dummy Student",
+      "is_course": false,
+      "is_active": true,
+      "technologies": [],
+      "wise_course_name_note": "",
+	  "is_course_mmyy_required":"N"
+    },
+    {
+      "short_code": "ADEPRJ",
+      "course_name": "Azure Project",
+      "is_course": false,
+      "is_active": true,
+      "technologies": [],
+      "wise_course_name_note": "",
+	  "is_course_mmyy_required":"Y"
+    }
+  ]
+}

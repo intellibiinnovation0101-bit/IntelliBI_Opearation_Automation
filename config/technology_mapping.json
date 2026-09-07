@@ -1,0 +1,178 @@
+{
+  "_metadata": {
+    "description": "Technology mapping reference data for IntelliBI. Lists each technology with its active-naming flag, plus a supplemental keyword list.",
+    "source_file": "TechnologyMappingDocuments.xlsx",
+    "generated_on": "2026-06-13",
+    "notes": "Sheet1.AvgNumofHours was empty in the source (kept as null). The source's second sheet was removed by the owner, so the prior 'course_names' and 'technology_naming_options' sections were dropped. 'additional_keywords' is a supplemental keyword list (maintained separately from the source workbook).",
+    "counts": {
+      "technologies": 29,
+      "additional_keywords": 7
+    }
+  },
+  "technologies": [
+    {
+      "technology_name": "SQL",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Python",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "AI (GenAI • Agentic AI • ML)",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "PySpark",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Databricks",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Azure Services",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Data Warehouse",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "AI for Data Engineers & Data Analytics",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "AI for Data Engineers",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "AI for Data Analytics",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Advanced Excel | R",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "AWS",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Power BI",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Tableau",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Advanced Azure",
+      "is_active_naming": false,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Advanced Excel | R",
+      "is_active_naming": false,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Advanced Excel | R | Tableau",
+      "is_active_naming": false,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Advanced Python",
+      "is_active_naming": false,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Advanced Python | PySpark",
+      "is_active_naming": false,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Azure",
+      "is_active_naming": false,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Business Communication",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "ChatGPT",
+      "is_active_naming": false,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "CI/CD Github",
+      "is_active_naming": false,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Core Advanced Python",
+      "is_active_naming": false,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Data Science - AI",
+      "is_active_naming": false,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "SQL | Core Advanced Python",
+      "is_active_naming": false,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "SQL | Python",
+      "is_active_naming": false,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "SQL | Python |Azure",
+      "is_active_naming": false,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "Tableau | ChatGPT",
+      "is_active_naming": false,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "DA",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+    {
+      "technology_name": "GCP",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    }
+  ],
+  "additional_keywords": [
+    "Sample Course",
+    "Project",
+    "Learning Journey with IntelliBI",
+    "Domain",
+    "Consultations",
+    "Placement Phase",
+    "Interview"
+  ]
+}

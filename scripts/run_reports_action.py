@@ -46,6 +46,8 @@ JOBS = [
     ("pyAdmissionFormalitiesReport", "Admission Formalities Report",
         ["pyStudentPaymentClassesStudentEnrolled", "pyZohoSignatureStatusRefresh"]),
     ("pyStudentAdditionalNote", "Student Additional Note", []),
+    ("pyWiseDataValidationReport", "Wise Data Validation Report",
+        ["pyStudentPaymentClassesStudentEnrolled"]),
 ]
 
 

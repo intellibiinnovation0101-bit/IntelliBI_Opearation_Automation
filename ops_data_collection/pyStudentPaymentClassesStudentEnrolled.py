@@ -292,6 +292,14 @@ def _lower(val) -> str:
     return _trim(val).lower()
 
 
+def _norm_mobile(val) -> str:
+    """Digits-only mobile used ONLY for accounting / log lines — never as a
+    business key or a written field. Keeps the last 10 digits so a number reads
+    the same whether or not it carries a +91 / 0 country/trunk prefix."""
+    digits = re.sub(r"\D", "", str(val or ""))
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
 # ── additionalNote parser ─────────────────────────────────────────────────────
 
 # Map normalised key text → column name
@@ -962,68 +970,102 @@ def fetch_all_students(use_cache: bool = True) -> list:
 
 
 def transform_students(all_students: list) -> tuple:
-    """Transform raw student records → (student_rows, payment_rows)."""
+    """Transform raw student records -> (student_rows, payment_rows, stats).
+
+    Every SOURCE student is driven to exactly one accounted outcome so none can
+    vanish without a trace:
+      * built            -> a Students row was produced (later Inserted/Updated/
+                            Unchanged by the upsert).
+      * skipped_empty     -> null/empty source entry.
+      * skipped_no_id     -> no `_id` on the portal record (cannot key a row).
+      * skipped_duplicate -> the same `_id` already produced a row this run.
+      * failed            -> an unexpected error while building the row (one bad
+                            record can no longer abort the whole batch).
+    Every skip/failure is logged with the student name, normalized mobile, the
+    destination tab and the exact reason. The row field mapping is unchanged."""
     synced_at    = now_ist_ymd()
     student_rows = []
     payment_rows = []
     student_set  = set()
+    stats = {"source": len(all_students), "built": 0, "skipped_empty": 0,
+             "skipped_no_id": 0, "skipped_duplicate": 0, "failed": 0}
 
     for student in all_students:
         if not student:
+            stats["skipped_empty"] += 1
+            print("[Students][SKIP] tab=Students reason=null/empty source entry")
             continue
 
         sid  = student.get("_id") or ""
         snam = _tc(student.get("name") or "")       # TRIM + InitCap
+        mob  = _norm_mobile(student.get("phoneNumber") or "")   # for logging only
 
+        # ── Student row: one per unique _id (field mapping unchanged) ─────────
         if sid and sid not in student_set:
-            student_set.add(sid)
+            try:
+                student_set.add(sid)
 
-            # batch_name (tags) — list → comma-separated string
-            tags_raw   = student.get("tags") or []
-            batch_name = ", ".join(str(t) for t in tags_raw) if isinstance(tags_raw, list) else _trim(str(tags_raw))
+                # batch_name (tags) — list → comma-separated string
+                tags_raw   = student.get("tags") or []
+                batch_name = ", ".join(str(t) for t in tags_raw) if isinstance(tags_raw, list) else _trim(str(tags_raw))
 
-            # additionalNote — parse into individual columns
-            note_parsed = _parse_additional_note(student.get("additionalNote") or "")
+                # additionalNote — parse into individual columns
+                note_parsed = _parse_additional_note(student.get("additionalNote") or "")
 
-            # candidate_name fallback: when the note has no usable candidate name
-            # (missing line, blank, or an 'N/A' placeholder), fall back to the
-            # student's own name so the column is never left empty.
-            _cn = _trim(note_parsed.get("candidate_name"))
-            if _cn.lower() in _NOTE_PLACEHOLDERS:
-                note_parsed["candidate_name"] = snam
+                # candidate_name fallback: when the note has no usable candidate name
+                # (missing line, blank, or an 'N/A' placeholder), fall back to the
+                # student's own name so the column is never left empty.
+                _cn = _trim(note_parsed.get("candidate_name"))
+                if _cn.lower() in _NOTE_PLACEHOLDERS:
+                    note_parsed["candidate_name"] = snam
 
-            # Batch_Timing — derived from the batch_name suffix (E/W/none)
-            batch_timing = _derive_batch_timing(batch_name)
+                # Batch_Timing — derived from the batch_name suffix (E/W/none)
+                batch_timing = _derive_batch_timing(batch_name)
 
-            student_rows.append({
-                "student_id":   sid,
-                "student_name": snam,
-                "email":        _lower(student.get("email") or ""),
-                "phone":        _trim(student.get("phoneNumber") or ""),
-                "batch_name":   batch_name,
-                "Batch_Timing": batch_timing,
-                **note_parsed,
-                "joined_on":    (
-                    student.get("joinedOn")
-                    or student.get("joined_on")
-                    or student.get("joiningDate")
-                    or ""
-                ),
-                "profile_picture": _trim(
-                    student.get("profilePicture")
-                    or student.get("profilePic")
-                    or student.get("photo")
-                    or student.get("dp")
-                    or ((student.get("userId") or {}).get("profilePicture")
-                        if isinstance(student.get("userId"), dict) else "")
-                    or ""
-                ),
-                "reg_enabled":    student.get("reg_enabled") or "",
-                "reg_status":     student.get("reg_status") or "",
-                "Is_Deleted":     "N",   # present on portal this run
-                "synced_at":      synced_at,
-            })
+                student_rows.append({
+                    "student_id":   sid,
+                    "student_name": snam,
+                    "email":        _lower(student.get("email") or ""),
+                    "phone":        _trim(student.get("phoneNumber") or ""),
+                    "batch_name":   batch_name,
+                    "Batch_Timing": batch_timing,
+                    **note_parsed,
+                    "joined_on":    (
+                        student.get("joinedOn")
+                        or student.get("joined_on")
+                        or student.get("joiningDate")
+                        or ""
+                    ),
+                    "profile_picture": _trim(
+                        student.get("profilePicture")
+                        or student.get("profilePic")
+                        or student.get("photo")
+                        or student.get("dp")
+                        or ((student.get("userId") or {}).get("profilePicture")
+                            if isinstance(student.get("userId"), dict) else "")
+                        or ""
+                    ),
+                    "reg_enabled":    student.get("reg_enabled") or "",
+                    "reg_status":     student.get("reg_status") or "",
+                    "Is_Deleted":     "N",   # present on portal this run
+                    "synced_at":      synced_at,
+                })
+                stats["built"] += 1
+            except Exception as e:                       # noqa: BLE001
+                stats["failed"] += 1
+                print(f"[Students][FAIL] name={snam!r} mobile={mob} tab=Students "
+                      f"reason=row build error: {e}")
+        elif not sid:
+            stats["skipped_no_id"] += 1
+            print(f"[Students][SKIP] name={snam!r} mobile={mob} tab=Students "
+                  f"reason=source record has no student _id (cannot key a row)")
+        else:
+            stats["skipped_duplicate"] += 1
+            print(f"[Students][SKIP] name={snam!r} mobile={mob} tab=Students "
+                  f"reason=duplicate _id already loaded this run ({sid})")
 
+        # Payments — unchanged: still emitted for every source student that has a
+        # fee summary (independent of the student-row dedup above).
         for cls in (student.get("classrooms") or []):
             fee = cls.get("feeSummary")
             if not fee:
@@ -1043,8 +1085,10 @@ def transform_students(all_students: list) -> tuple:
                 "synced_at":           synced_at,
             })
 
-    print(f"[Transform B] Students: {len(student_rows)} | Payments: {len(payment_rows)}")
-    return student_rows, payment_rows
+    _skipped = stats["skipped_empty"] + stats["skipped_no_id"] + stats["skipped_duplicate"]
+    print(f"[Transform B] Students built: {len(student_rows)} | Payments: {len(payment_rows)} "
+          f"| Source: {stats['source']} | Skipped: {_skipped} | Failed: {stats['failed']}")
+    return student_rows, payment_rows, stats
 
 
 def fetch_existing_student_rows(service, spreadsheet_id: str, tab_name: str,
@@ -1134,7 +1178,8 @@ def run_pipeline_b(service, use_cache: bool = True) -> bool:
     # (the /institutes/v3/{id}/students list endpoint does not return these fields)
     all_students = enrich_students_with_profile(all_students, use_cache=use_cache)
 
-    student_rows, payment_rows = transform_students(all_students)
+    student_rows, payment_rows, tstats = transform_students(all_students)
+    fetched_built = len(student_rows)          # rows built from THIS portal fetch
 
     # Flag students that exist in the sheet but were not returned by the portal
     # this run (deleted on portal) with Is_Deleted='Y'; fetched students are 'N'.
@@ -1144,7 +1189,7 @@ def run_pipeline_b(service, use_cache: bool = True) -> bool:
     # sheet-level sort below is the authoritative final ordering.
     student_rows.sort(key=lambda r: _trim(r.get("joined_on")), reverse=True)
 
-    upsert_rows(service, SHEET_ID, STUDENTS_TAB, STUDENTS_COLUMNS, student_rows, ["student_id"])
+    sres = upsert_rows(service, SHEET_ID, STUDENTS_TAB, STUDENTS_COLUMNS, student_rows, ["student_id"]) or {}
     upsert_rows(service, SHEET_ID, PAYMENTS_TAB, PAYMENTS_COLUMNS, payment_rows, ["student_id"])
 
     # upsert_rows updates in place / appends at the bottom and never reorders the
@@ -1155,7 +1200,32 @@ def run_pipeline_b(service, use_cache: bool = True) -> bool:
         "joined_on", descending=True,
     )
 
-    print(f"  Students written : {len(student_rows)}")
+    # ── Final per-record accounting — every SOURCE student reaches exactly one
+    #    state, and the Students tab write is reconciled, so nothing is lost
+    #    without a trace. (Inserted/Updated/Unchanged are for the Students tab;
+    #    they include the Is_Deleted='Y' flip for students dropped on the portal,
+    #    which is why they can exceed the freshly-built count.) ────────────────
+    _skipped = (tstats["skipped_empty"] + tstats["skipped_no_id"]
+                + tstats["skipped_duplicate"])
+    print("  " + "-" * 60)
+    print("  Students loading — final accounting")
+    print(f"    Source records (portal)   : {tstats['source']}")
+    print(f"    Built into rows           : {tstats['built']}")
+    print(f"    Intentionally Skipped     : {_skipped}  "
+          f"(empty={tstats['skipped_empty']}, "
+          f"no_id={tstats['skipped_no_id']}, "
+          f"duplicate={tstats['skipped_duplicate']})")
+    print(f"    Failed (row build)        : {tstats['failed']}")
+    print(f"    -> Students tab  Inserted : {sres.get('inserted', 0)} | "
+          f"Updated: {sres.get('updated', 0)} | "
+          f"Unchanged: {sres.get('unchanged', 0)}")
+    print("  " + "-" * 60)
+    if tstats["source"] != (tstats["built"] + _skipped + tstats["failed"]):
+        print("    [WARN] source count does not equal built+skipped+failed — "
+              "investigate; a record may be unaccounted for.")
+
+    print(f"  Students written : {fetched_built} built + "
+          f"{len(student_rows) - fetched_built} portal-removed flagged")
     print(f"  Payments written : {len(payment_rows)}")
     return True
 
@@ -1550,9 +1620,22 @@ def main():
 
     service = get_sheets_service(SERVICE_ACCOUNT_FILE)
 
-    ok_a = run_pipeline_a(service, use_cache=use_cache)   # ClassLearnerTeacherEnrolled (sessions API)
-    ok_b = run_pipeline_b(service, use_cache=use_cache)   # Students + Payments
-    ok_c = run_pipeline_c(service, use_cache=use_cache)   # Instructors (SCD Type-2)
+    # Each pipeline is ISOLATED: a crash in one must never prevent the others
+    # from running. Previously an unexpected error in Pipeline A propagated out
+    # of main() and Pipeline B (Students) never ran, so the Students tab silently
+    # went stale. Now every pipeline always gets its turn and reports its state.
+    def _run_stage(name, fn):
+        try:
+            return bool(fn())
+        except Exception as e:                            # noqa: BLE001
+            import traceback
+            print(f"\n[{name}] ABORTED with an unexpected error: {e}")
+            traceback.print_exc()
+            return False
+
+    ok_a = _run_stage("Pipeline A", lambda: run_pipeline_a(service, use_cache=use_cache))   # ClassLearnerTeacherEnrolled
+    ok_b = _run_stage("Pipeline B", lambda: run_pipeline_b(service, use_cache=use_cache))   # Students + Payments
+    ok_c = _run_stage("Pipeline C", lambda: run_pipeline_c(service, use_cache=use_cache))   # Instructors (SCD Type-2)
 
     print(f"\n{sep}")
     print("  Summary")
@@ -1561,6 +1644,10 @@ def main():
     print(f"  Pipeline C (Instructor - SCD Type-2)     : {'COMPLETE' if ok_c else 'FAILED - no writes'}")
     print(f"{sep}\n")
 
+    # Non-zero exit if ANY pipeline failed, so a failure is never silently
+    # reported as success (each pipeline still ran independently above).
+    return 0 if (ok_a and ok_b and ok_c) else 1
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
