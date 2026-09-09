@@ -74,11 +74,6 @@ SERVICE_ACCOUNT_FILE = os.path.join(CREDENTIALS_DIR, "service_account.json"
 
 SHEET_ID             = "1TqDjq4gAyo32eRNMbuLd6uu0eCNZb7h1j5YH-q68AhU"   # IntellBIAttendance
 CHUNK_DAYS           = 30    # Split date range into 30-day windows per API call
-# Step 5c late-attendance backfill: how many recent days to re-check FRESH for
-# attendance/feedback that finalised AFTER a session was first synced (see the
-# backfill_recent_attendance() header). Recovers such rows without moving the
-# watermark. Generic; no technology/date/session is hard-coded.
-BACKFILL_LOOKBACK_DAYS = 7
 
 # ── Force full refresh ────────────────────────────────────────────────────────
 # Add tab names here to force a one-time full reload (clears existing data,
@@ -765,8 +760,7 @@ def is_new(s_ist: str, sheet: str, watermarks: dict) -> bool:
 
 
 def transform(all_sessions: list, watermarks: dict, synced_at: str,
-              suspended_by_class: dict = None, use_cache: bool = True,
-              seen: dict = None) -> dict:
+              suspended_by_class: dict = None, use_cache: bool = True) -> dict:
     """
     Transform raw session objects into rows for each output tab.
     Returns a dict:
@@ -787,16 +781,13 @@ def transform(all_sessions: list, watermarks: dict, synced_at: str,
     """
     if suspended_by_class is None:
         suspended_by_class = {}
-    # dedup sets — normally fresh per run; the Step 5c backfill passes a set
-    # pre-seeded from the existing sheet so already-present rows are not re-added.
-    if seen is None:
-        seen = {
-            "s":    set(),   # session dedup
-            "a":    set(),   # attendance dedup (session_id + student_id)
-            "sf":   set(),   # student feedback dedup
-            "tf":   set(),   # teacher feedback dedup
-            "notf": set(),   # sessions_no_tf dedup
-        }
+    seen = {
+        "s":    set(),   # session dedup
+        "a":    set(),   # attendance dedup (session_id + student_id)
+        "sf":   set(),   # student feedback dedup
+        "tf":   set(),   # teacher feedback dedup
+        "notf": set(),   # sessions_no_tf dedup
+    }
 
     output = {
         "Sessions":        [],
@@ -1206,122 +1197,6 @@ def backfill_session_end_times(service):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  STEP 5c — Backfill late-arriving ATTENDANCE / FEEDBACK for recent sessions
-#
-#  ROOT-CAUSE FIX. The pipeline is append-only with a strict start-time
-#  high-watermark (is_new: session_start > watermark). A session synced while its
-#  attendance had not yet finalised — e.g. a fresh morning session synced minutes
-#  after it started — is written with ZERO attendance rows; once the watermark
-#  advances past that session's start time, is_new() can never re-admit it, so its
-#  attendance is lost permanently (this is exactly what happened to the 08-Sep
-#  06:50 session vs the 07:00 Attendance watermark).
-#
-#  This pass re-fetches ONLY the last BACKFILL_LOOKBACK_DAYS days FRESH (cache
-#  bypassed so the 24h empty-attendance cache can't hide finalised data), seeds the
-#  per-row dedup keys from what is already in the sheet, and appends only rows that
-#  are genuinely new. It NEVER advances the watermark and CANNOT create duplicates,
-#  so the normal incremental engine is completely untouched. Fully generic — it
-#  recovers any technology/session whose facts finalise after the first sync.
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _read_tab_values(service, tab_name: str) -> list:
-    """Read all values from a tab (header + rows). Returns [] on any error."""
-    try:
-        result = (service.spreadsheets().values()
-                  .get(spreadsheetId=SHEET_ID, range=f"{tab_name}!A:ZZ").execute())
-        return result.get("values", [])
-    except HttpError as e:
-        print(f"[Backfill 5c] Could not read '{tab_name}': {e}")
-        return []
-
-
-def _seed_seen_from_sheet(service) -> dict:
-    """Build dedup sets from the rows ALREADY in the sheet, using the exact same
-    keys transform() uses, so a re-processed session never duplicates rows."""
-    seen = {"s": set(), "a": set(), "sf": set(), "tf": set(), "notf": set()}
-
-    def _idx(header, name):
-        for i, h in enumerate(header):
-            if str(h).strip() == name:
-                return i
-        return -1
-
-    def _val(row, i):
-        return str(row[i]).strip() if 0 <= i < len(row) else ""
-
-    def _load(tab, set_key, build):
-        vals = _read_tab_values(service, tab)
-        if len(vals) < 2:
-            return
-        hdr = [str(h).strip() for h in vals[0]]
-        si  = _idx(hdr, "session_id")
-        di  = _idx(hdr, "student_id")
-        for row in vals[1:]:
-            k = build(_val(row, si), _val(row, di))
-            if k:
-                seen[set_key].add(k)
-
-    _load(SESSIONS_TAB,       "s",    lambda sid, stid: sid or None)
-    _load(ATTENDANCE_TAB,     "a",    lambda sid, stid: f"{sid}_{stid}" if sid and stid else None)
-    _load(STUDENT_FB_TAB,     "sf",   lambda sid, stid: f"{sid}_{stid}" if sid and stid else None)
-    _load(TEACHER_FB_TAB,     "tf",   lambda sid, stid: f"{sid}_teacher" if sid else None)
-    _load(SESSIONS_NO_TF_TAB, "notf", lambda sid, stid: sid or None)
-    print(f"[Backfill 5c] Seeded dedup from sheet — "
-          f"sessions:{len(seen['s'])} attendance:{len(seen['a'])} "
-          f"student_fb:{len(seen['sf'])} teacher_fb:{len(seen['tf'])}")
-    return seen
-
-
-def backfill_recent_attendance(service, synced_at: str, use_cache: bool = False):
-    """Recover attendance/feedback that finalised after a session's first sync.
-    Additive, deduped against the sheet, and watermark-neutral (see Step 5c header)."""
-    try:
-        today = datetime.now(IST).date()
-        start = today - timedelta(days=BACKFILL_LOOKBACK_DAYS)
-        print(f"\n[Backfill 5c] Late-attendance backfill — window {start} → {today} (FRESH)")
-
-        # 1. Re-fetch the recent window FRESH (bypass caches so finalised data shows).
-        window_sessions = fetch_all_sessions([(str(start), str(today))])
-        if not window_sessions:
-            print("[Backfill 5c] No sessions in window — nothing to backfill.")
-            return
-
-        # 2. Seed dedup keys from what is already in the sheet.
-        seen = _seed_seen_from_sheet(service)
-
-        # 3. Per-class suspension lookup, exactly as the main run does.
-        class_ids = set()
-        for s in window_sessions:
-            c = s.get("classId") or {}
-            cid = c.get("_id") if isinstance(c, dict) else (c if isinstance(c, str) else "")
-            if cid:
-                class_ids.add(cid)
-        suspended_by_class = fetch_suspended_students(class_ids, use_cache=use_cache)
-
-        # 4. Transform with FULL-LOAD watermarks (admit all) + seeded dedup, so only
-        #    genuinely-new rows survive. use_cache=False → attendance fetched fresh.
-        full_wm = {s: None for s in WATERMARK_SHEETS}
-        output, counts, _ = transform(window_sessions, full_wm, synced_at,
-                                      suspended_by_class, use_cache=use_cache, seen=seen)
-
-        total_new = sum(len(v) for v in output.values())
-        if total_new == 0:
-            print("[Backfill 5c] No missing rows found — everything already in sheet.")
-            return
-
-        print(f"[Backfill 5c] Recovering → Attendance:{counts.get('Attendance', 0)} "
-              f"Student_FB:{counts.get('Student_Feedback', 0)} "
-              f"Teacher_FB:{counts.get('Teacher_Feedback', 0)} "
-              f"Sessions:{counts.get('Sessions', 0)}")
-
-        # 5. Append only. Watermarks are intentionally NOT written here — the normal
-        #    incremental engine keeps full ownership of the watermark.
-        write_all_tabs(service, output)
-    except Exception as e:
-        print(f"[Backfill 5c] ⚠ Error during attendance backfill: {e}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 #  STEP 6 — Write Watermark  (mirrors Prepare Watermark → Write Watermark nodes)
 #
 #  Watermark strategy (mirrors the n8n Prepare Watermark code node exactly):
@@ -1450,12 +1325,6 @@ def main():
 
     # ── Step 5b: Backfill blank end_time_ist from Attendance ──────────────────
     backfill_session_end_times(service)
-
-    # ── Step 5c: Backfill late-arriving attendance/feedback for recent sessions ─
-    # Recovers rows for sessions synced before their attendance finalised (the
-    # strict start-time watermark can otherwise never re-admit them). Additive,
-    # deduped, and watermark-neutral — see backfill_recent_attendance() header.
-    backfill_recent_attendance(service, synced_at, use_cache=False)
 
     # ── Step 6: Write watermarks ───────────────────────────────────────────────
     write_watermarks(service, watermarks, counts, max_ist)

@@ -524,44 +524,6 @@ def _session_dur_min(row) -> float:
         return 0.0
 
 
-def _classify_session_type(has_attendance: bool, has_duration: bool,
-                           end_blank: bool, start_raw: str) -> str:
-    """Classify a session as 'normal', 'scheduled' or 'cancelled' — the single,
-    generic session-status rule shared by every sheet.
-
-      normal    : students attended OR a duration is available → it happened.
-      scheduled : no attendance/duration yet AND the start is in the future OR
-                  the session is from TODAY. A same-day session whose attendance
-                  and end-time have not synced yet must NOT be called cancelled —
-                  the meeting-platform sync arrives after the session, and the
-                  moment any attendance/end-time lands the row becomes 'normal'
-                  with its real duration.
-      cancelled : no attendance, no duration and a blank end-time, AND the start
-                  is on a PRIOR day (a full day passed and nothing ever synced) →
-                  the session genuinely did not take place.
-
-    This is why a completed session was being mis-labelled 'Cancelled': the old
-    rule flipped to 'cancelled' the instant the clock passed the start time, even
-    on the same day before the platform had synced the attendance/end-time.
-    Nothing here is hard-coded to a technology, date or session."""
-    if has_attendance or has_duration:
-        return "normal"
-    try:
-        _start_dt = datetime.strptime(str(start_raw)[:19], "%Y-%m-%d %H:%M:%S")
-    except (ValueError, TypeError):
-        _start_dt = None
-    if _start_dt is not None:
-        _is_future     = _start_dt >= datetime.now()
-        _started_today = _start_dt.date() >= date.today()
-    else:
-        _is_future = _started_today = False
-    if end_blank and (_is_future or _started_today):
-        return "scheduled"      # future OR same-day-pending (data may still sync)
-    if end_blank:
-        return "cancelled"      # prior-day session with no data → truly cancelled
-    return "scheduled"
-
-
 def _remarks(pct: float, status: str) -> str:
     if status == "Absent":
         return "■ Absent"
@@ -775,57 +737,6 @@ def _na_count(df: pd.DataFrame) -> int:
     return 0
 
 
-def _email_attendance_rows(sess_f: pd.DataFrame, att_f: pd.DataFrame,
-                           report_type: str) -> list:
-    """Per-technology attendance summary for the email body — the SAME numbers the
-    'Session Summary' tab shows, aggregated by Tech Name (course_name):
-    Total Enrolled, Att. N/A Count, Present, Absent, Att %.
-
-    Reuses the identical helpers/dedup rule as build_session_summary so the email
-    figures never diverge from the report's Session Summary tab."""
-    rows = []
-    if sess_f is None or sess_f.empty or "course_name" not in sess_f.columns \
-            or "session_id" not in sess_f.columns:
-        return rows
-    # Non-daily reports count one row per (session_id, student_id) — mirror Session Summary.
-    if report_type != "daily" and "session_id" in att_f.columns and "student_id" in att_f.columns:
-        att_base = att_f.drop_duplicates(subset=["session_id", "student_id"])
-    else:
-        att_base = att_f
-    tech_key = sess_f["course_name"].astype(str).str.strip()
-    for tech, grp in sess_f.groupby(tech_key, sort=True):
-        if not str(tech).strip():
-            continue
-        sids   = grp["session_id"].tolist()
-        sa     = att_base[att_base["session_id"].isin(sids)] \
-                 if "session_id" in att_base.columns else att_base.iloc[0:0]
-        sa_app = _applicable(sa)
-        enrolled = len(sa)
-        na_cnt   = _na_count(sa)
-        applic_n = len(sa_app)
-        present  = int((sa_app["status"] == "Present").sum()) if "status" in sa_app.columns else 0
-        absent   = int((sa_app["status"] == "Absent").sum())  if "status" in sa_app.columns else 0
-        att_pct  = round(present / applic_n * 100, 1) if applic_n else 0.0
-        # Skip technologies with no enrolled attendance rows in the period (e.g.
-        # purely cancelled/scheduled sessions) so the email table stays meaningful.
-        if enrolled == 0:
-            continue
-        rows.append({"tech": str(tech).strip(), "enrolled": enrolled,
-                     "na": na_cnt, "present": present, "absent": absent,
-                     "att_pct": att_pct})
-    return rows
-
-
-def _email_att_color(pct: float):
-    """(background, text) colours for the email Att % cell.
-    Att % > 70 → Green · 55–70 (inclusive) → Amber · < 55 → Red."""
-    if pct > 70:
-        return "#E8F5E9", "#1B7A34"     # green
-    if pct >= 55:
-        return "#FFF4D6", "#8A6D00"     # amber
-    return "#FDE0E0", "#B02A2A"         # red
-
-
 def build_session_summary(ws, sess_f: pd.DataFrame, att_f: pd.DataFrame,
                           report_type: str, label: str, fb_f: pd.DataFrame = None,
                           prev_trend: dict = None, yest_date=None):
@@ -942,8 +853,19 @@ def build_session_summary(ws, sess_f: pd.DataFrame, att_f: pd.DataFrame,
             _has_attendance = len(sa) > 0
             _has_duration   = dur_min > 0
             _start_raw = str(sess.get("start_time_ist", "")).strip()
-            _sess_type = _classify_session_type(_has_attendance, _has_duration,
-                                                _end_blank, _start_raw)
+            try:
+                _start_dt = datetime.strptime(_start_raw[:19], "%Y-%m-%d %H:%M:%S")
+                _is_future = _start_dt >= datetime.now()
+            except (ValueError, TypeError):
+                _is_future = False
+            if _has_attendance or _has_duration:
+                _sess_type = "normal"
+            elif _end_blank and _is_future:
+                _sess_type = "scheduled"
+            elif _end_blank:
+                _sess_type = "cancelled"
+            else:
+                _sess_type = "scheduled"
 
             if _sess_type == "cancelled":
                 row_bg = C_GREY_CANCEL
@@ -1711,8 +1633,19 @@ def build_feedback_rating(ws, sess_f: pd.DataFrame, att_f: pd.DataFrame,
             _has_attendance = len(sa) > 0
             _has_duration   = dur_min > 0
             _start_raw = str(sess.get("start_time_ist", "")).strip()
-            _sess_type = _classify_session_type(_has_attendance, _has_duration,
-                                                _end_blank, _start_raw)
+            try:
+                _start_dt = datetime.strptime(_start_raw[:19], "%Y-%m-%d %H:%M:%S")
+                _is_future = _start_dt >= datetime.now()
+            except (ValueError, TypeError):
+                _is_future = False
+            if _has_attendance or _has_duration:
+                _sess_type = "normal"
+            elif _end_blank and _is_future:
+                _sess_type = "scheduled"
+            elif _end_blank:
+                _sess_type = "cancelled"
+            else:
+                _sess_type = "scheduled"
 
             # Session Date with time
             _session_dt = str(sess.get("start_time_ist", ""))[:19]
@@ -1897,8 +1830,19 @@ def build_teacher_no_feedback(ws, sess_f: pd.DataFrame, tf_f: pd.DataFrame,
             _has_attendance = sa_count > 0
             _has_duration   = dur_min > 0
             _start_raw = str(r.get("start_time_ist", "")).strip()
-            _sess_type = _classify_session_type(_has_attendance, _has_duration,
-                                                _end_blank, _start_raw)
+            try:
+                _start_dt = datetime.strptime(_start_raw[:19], "%Y-%m-%d %H:%M:%S")
+                _is_future = _start_dt >= datetime.now()
+            except (ValueError, TypeError):
+                _is_future = False
+            if _has_attendance or _has_duration:
+                _sess_type = "normal"
+            elif _end_blank and _is_future:
+                _sess_type = "scheduled"
+            elif _end_blank:
+                _sess_type = "cancelled"
+            else:
+                _sess_type = "scheduled"
 
             vals   = [r.get("course_name",""), r.get("course_title",""), r.get("tutor_name",""),
                       str(r.get("start_time_ist",""))[:19], str(r.get("end_time_ist",""))[:19]]
@@ -2038,11 +1982,8 @@ def _gdrive_get_or_create_subfolder(drive_service, parent_id: str, name: str) ->
 
 def upload_to_gdrive(service_account_file: str, report_type: str,
                      filename: str, file_buffer: io.BytesIO):
-    """Upload the report Excel buffer directly to the designated Drive folder as a
-    NATIVE GOOGLE SHEET (converted on upload), so the email link opens straight in
-    Google Sheets — no manual .xlsx-to-Sheet conversion. No local file is created;
-    the workbook is streamed from memory. Returns the file's webViewLink (a
-    Google Sheets URL) or "" when the upload is skipped/fails."""
+    """Upload the report Excel buffer directly to the designated Drive folder.
+    No local file is created — the workbook is streamed from memory."""
     try:
         from googleapiclient.discovery import build as gdrive_build
         from googleapiclient.http      import MediaIoBaseUpload
@@ -2051,7 +1992,7 @@ def upload_to_gdrive(service_account_file: str, report_type: str,
         folder_id = GDRIVE_FOLDER_MAP.get(report_type.lower())
         if not folder_id:
             print(f"[Drive] ⚠ No Drive folder configured for report type '{report_type}' — skipping upload.")
-            return ""
+            return
 
         creds = service_account.Credentials.from_service_account_file(
             service_account_file,
@@ -2062,12 +2003,8 @@ def upload_to_gdrive(service_account_file: str, report_type: str,
         creds = creds.with_subject("info@intellibiinnovationstechnologies.in")
         drive_service = gdrive_build("drive", "v3", credentials=creds)
 
-        # As a Google Sheet the file needs no ".xlsx" extension in its name.
-        drive_name = filename[:-5] if filename.lower().endswith(".xlsx") else filename
-
-        # Remove existing file(s) with the same name to avoid duplicates.
-        safe_name = drive_name.replace("'", "\\'")
-        query = f"'{folder_id}' in parents and name='{safe_name}' and trashed=false"
+        # Remove existing file with same name to avoid duplicates
+        query = f"'{folder_id}' in parents and name='{filename}' and trashed=false"
         existing = drive_service.files().list(
             q=query,
             fields="files(id)",
@@ -2080,31 +2017,24 @@ def upload_to_gdrive(service_account_file: str, report_type: str,
                 supportsAllDrives=True,
             ).execute()
 
-        # Stream from the in-memory buffer — no local file needed. Source media is
-        # the .xlsx; target mimeType is a Google Sheet → Drive converts on upload,
-        # preserving tabs, data, formulas, formatting and charts.
+        # Stream from the in-memory buffer — no local file needed
         file_buffer.seek(0)
         media = MediaIoBaseUpload(
             file_buffer,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             resumable=False,
         )
-        meta     = {"name": drive_name, "parents": [folder_id],
-                    "mimeType": "application/vnd.google-apps.spreadsheet"}
+        meta     = {"name": filename, "parents": [folder_id]}
         uploaded = drive_service.files().create(
             body=meta,
             media_body=media,
             fields="id,webViewLink",
             supportsAllDrives=True,
         ).execute()
-        link = uploaded.get("webViewLink", "") or \
-            f"https://docs.google.com/spreadsheets/d/{uploaded.get('id','')}/edit"
-        print(f"[Drive] ✓ Uploaded (as Google Sheet) → {report_type.title()} folder / {drive_name}")
-        print(f"[Drive]   Link: {link}")
-        return link
+        print(f"[Drive] ✓ Uploaded → {report_type.title()} folder / {filename}")
+        print(f"[Drive]   Link: {uploaded.get('webViewLink', '')}")
     except Exception as e:
         print(f"[Drive] ⚠ Upload failed: {e}")
-        return ""
 
 
 def save_to_local_directory(report_type: str, filename: str, file_bytes: bytes):
@@ -2129,93 +2059,29 @@ def save_to_local_directory(report_type: str, filename: str, file_bytes: bytes):
 #  EMAIL
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_attendance_table(att_rows: list) -> str:
-    """Management-friendly per-technology attendance table for the email body.
-    Columns: Tech Name | Total Enrolled | Att. N/A Count | Present | Absent | Att %.
-    The Att % cell is colour-coded (Green > 70 · Amber 55–70 · Red < 55)."""
-    if not att_rows:
-        return ""
-    NAVY = "#1B355E"
-    th = ("padding:8px 10px;background:%s;color:#ffffff;font-weight:600;"
-          "border:1px solid #d0d7e2;font-size:13px;text-align:%s;")
-    td = "padding:7px 10px;border:1px solid #d0d7e2;font-size:13px;text-align:%s;"
-    head = (
-        f"<tr>"
-        f"<th style='{th % (NAVY, 'left')}'>Tech Name</th>"
-        f"<th style='{th % (NAVY, 'right')}'>Total Enrolled</th>"
-        f"<th style='{th % (NAVY, 'right')}'>Att. N/A Count</th>"
-        f"<th style='{th % (NAVY, 'right')}'>Present</th>"
-        f"<th style='{th % (NAVY, 'right')}'>Absent</th>"
-        f"<th style='{th % (NAVY, 'right')}'>Att %</th>"
-        f"</tr>")
-    body_rows = []
-    tot_enr = tot_na = tot_pres = tot_abs = 0
-    for i, r in enumerate(att_rows):
-        # Att % colour now applies to the WHOLE row (background), not just the
-        # Att % cell — same thresholds/colours as before. The Att % cell keeps its
-        # stronger text colour + bold for emphasis.
-        bg, tx = _email_att_color(r["att_pct"])
-        tot_enr += r["enrolled"]; tot_na += r["na"]
-        tot_pres += r["present"]; tot_abs += r["absent"]
-        body_rows.append(
-            f"<tr style='background:{bg};color:#1a2a48'>"
-            f"<td style='{td % 'left'}'>{r['tech']}</td>"
-            f"<td style='{td % 'right'}'>{r['enrolled']}</td>"
-            f"<td style='{td % 'right'}'>{r['na']}</td>"
-            f"<td style='{td % 'right'}'>{r['present']}</td>"
-            f"<td style='{td % 'right'}'>{r['absent']}</td>"
-            f"<td style='{(td % 'right')}color:{tx};font-weight:700'>"
-            f"{r['att_pct']:.1f}%</td>"
-            f"</tr>")
-    _applic = tot_pres + tot_abs
-    tot_pct = round(tot_pres / _applic * 100, 1) if _applic else 0.0
-    tbg, ttx = _email_att_color(tot_pct)
-    total_row = (
-        f"<tr style='background:{tbg};color:#1a2a48;font-weight:700'>"
-        f"<td style='{td % 'left'}'>TOTAL</td>"
-        f"<td style='{td % 'right'}'>{tot_enr}</td>"
-        f"<td style='{td % 'right'}'>{tot_na}</td>"
-        f"<td style='{td % 'right'}'>{tot_pres}</td>"
-        f"<td style='{td % 'right'}'>{tot_abs}</td>"
-        f"<td style='{(td % 'right')}color:{ttx};font-weight:700'>"
-        f"{tot_pct:.1f}%</td>"
-        f"</tr>")
-    return (
-        "<div style='font-size:14px;font-weight:700;color:#1B355E;margin:18px 0 6px'>"
-        "Attendance Summary — by Technology</div>"
-        "<table style='border-collapse:collapse;width:100%;max-width:640px'>"
-        f"{head}{''.join(body_rows)}{total_row}</table>"
-        "<div style='font-size:11px;color:#8a97ad;margin:4px 0 0'>"
-        "Att % colour: Green &gt; 70% &middot; Amber 55–70% &middot; Red &lt; 55%.</div>")
-
-
 def send_report(report_type: str, label: str, filename: str, file_bytes: bytes,
                 n_sessions: int, n_students: int,
-                n_absent: int, combined_att_pct: float,
-                att_rows: list = None, report_url: str = ""):
+                n_absent: int, combined_att_pct: float):
     subject = f"IntelliBI {report_type.title()} Attendance & Feedback Report — {label}"
-
-    att_table = _build_attendance_table(att_rows or [])
-
-    if report_url:
-        cta = (
-            f"<p style='margin:18px 0 6px'>"
-            f"<a href='{report_url}' style='background:#2B547E;color:#ffffff;"
-            f"text-decoration:none;padding:11px 22px;border-radius:6px;font-weight:600;"
-            f"font-size:14px;display:inline-block'>Open Attendance &amp; Feedback Report "
-            f"(Google Sheet) &nbsp;&rsaquo;</a></p>"
-            f"<p style='margin:0;color:#5b6b86;font-size:12px'>Or open it here: "
-            f"<a href='{report_url}' style='color:#2B547E;font-weight:600;"
-            f"text-decoration:none'>{filename}</a></p>")
-    else:
-        cta = ""
-
     body = f"""\
 <html><body style="font-family:Arial,sans-serif;color:#1F3864;">
 <h2 style="color:#1F3864;">📊 IntelliBI {report_type.title()} Attendance &amp; Feedback Report</h2>
-<p>Please find the {report_type} attendance &amp; feedback summary for <strong>{label}</strong>.</p>
-{att_table}
-{cta}
+<p>Please find the attached report for <strong>{label}</strong>.</p>
+<table style="border-collapse:collapse;font-size:14px;">
+  <tr>
+    <td style="padding:8px 18px;background:#D6E4F0;font-weight:bold;border:1px solid #B0B0B0;">Total Sessions</td>
+    <td style="padding:8px 18px;border:1px solid #B0B0B0;">{n_sessions}</td>
+  </tr><tr>
+    <td style="padding:8px 18px;background:#D6E4F0;font-weight:bold;border:1px solid #B0B0B0;">Total Students (records)</td>
+    <td style="padding:8px 18px;border:1px solid #B0B0B0;">{n_students}</td>
+  </tr><tr>
+    <td style="padding:8px 18px;background:#FFE0E0;font-weight:bold;border:1px solid #B0B0B0;">❌ Absent</td>
+    <td style="padding:8px 18px;border:1px solid #B0B0B0;"><strong>{n_absent}</strong></td>
+  </tr><tr>
+    <td style="padding:8px 18px;background:#E8F5E9;font-weight:bold;border:1px solid #B0B0B0;">📊 Combined Attendance %</td>
+    <td style="padding:8px 18px;border:1px solid #B0B0B0;"><strong>{combined_att_pct:.1f}%</strong></td>
+  </tr>
+</table>
 <br>
 <p style="font-size:12px;color:#888;">This is an automated report from IntelliBI Innovations Technologies.</p>
 </body></html>"""
@@ -2830,11 +2696,14 @@ def build_period_session_summary(ws, sess_f: pd.DataFrame, att_f: pd.DataFrame,
             _s_end_blank = _s_end_raw in ("", "nan", "NaT", "None", "NAN") or pd.isna(_s_row.get("end_time_ist"))
             _s_dur = _session_dur_min(_s_row)
             _s_att = len(att_f[att_f["session_id"] == _s_id]) if not att_f.empty and "session_id" in att_f.columns else 0
-            # Same generic rule as the per-session sheets: a same-day session
-            # whose data has not synced yet is NOT counted as cancelled.
+            # Check if session start is in the future → scheduled, not cancelled
             _s_start_raw = str(_s_row.get("start_time_ist", "")).strip()
-            if _classify_session_type(_s_att > 0, _s_dur > 0,
-                                      _s_end_blank, _s_start_raw) == "cancelled":
+            try:
+                _s_start_dt = datetime.strptime(_s_start_raw[:19], "%Y-%m-%d %H:%M:%S")
+                _s_is_future = _s_start_dt >= _now
+            except (ValueError, TypeError):
+                _s_is_future = False
+            if _s_end_blank and _s_att == 0 and _s_dur == 0 and not _s_is_future:
                 cancelled += 1
         sa_app    = _applicable(sa)                # applicable-only for Present/Absent/Att%
         enrolled  = len(sa)                         # Total Enrolled (incl. attendance-N/A)
@@ -3596,10 +3465,9 @@ def main():
     combined_att_pct = round(n_present / n_total * 100, 1) if n_total else 0.0
     n_suspended = len(att_susp)
 
-    # Google Drive upload (streams directly from buffer, converted to a Google
-    # Sheet). The returned link opens the report directly in Google Sheets.
+    # Google Drive upload (streams directly from buffer)
     print("[Drive] Uploading report …")
-    report_url = upload_to_gdrive(SERVICE_ACCOUNT_FILE, args.type, filename, buf)
+    upload_to_gdrive(SERVICE_ACCOUNT_FILE, args.type, filename, buf)
 
     # Local computer directory save — controlled by upload_to_local_directory.
     #   True  -> also save the report to LOCAL_UPLOAD_DIR; False -> skip entirely.
@@ -3608,17 +3476,12 @@ def main():
         print("[Local] Saving report …")
         save_to_local_directory(args.type, filename, file_bytes)
 
-    # Per-technology attendance summary for the email body (same figures as the
-    # Session Summary tab, aggregated by Tech Name).
-    att_rows = _email_attendance_rows(sess_f, att_f, args.type)
-
     # Email
     if args.no_email:
         print("[Email] Skipped (--no-email flag)")
     else:
         send_report(args.type, label, filename, file_bytes,
-                    len(sess_f), n_total, n_absent, combined_att_pct,
-                    att_rows=att_rows, report_url=report_url)
+                    len(sess_f), n_total, n_absent, combined_att_pct)
 
     print(f"\n{sep}")
     print(f"  Done.  Sessions: {len(sess_f)} | Students: {n_total} | Absent: {n_absent} | Suspended: {n_suspended} | Combined Att%: {combined_att_pct:.1f}%")

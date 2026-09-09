@@ -34,7 +34,9 @@
         "Azure Data Factory",
         "Azure Synapse",
         "Azure Services",
-        "Data Warehouse"
+        "Data Warehouse",
+		"Apache Airflow",
+		"Microsoft Fabric"
       ],
       "wise_course_name_note": "(Azure Data Factory | Azure Synapse | Azure Services) = Azure Services",
 	  "is_course_mmyy_required":"Y"
@@ -88,7 +90,9 @@
         "Azure Data Factory",
         "Azure Synapse",
         "Azure Services",
-        "Data Warehouse"
+        "Data Warehouse",
+		"Apache Airflow",
+		"Microsoft Fabric"
       ],
       "wise_course_name_note": "(Azure Data Factory | Azure Synapse | Azure Services) = Azure Services",
 	  "is_course_mmyy_required":"Y"
@@ -107,7 +111,9 @@
         "Azure Data Factory",
         "Azure Synapse",
         "Azure Services",
-        "Data Warehouse"
+        "Data Warehouse",
+		"Apache Airflow",
+		"Microsoft Fabric"
       ],
       "wise_course_name_note": "(Azure Data Factory | Azure Synapse | Azure Services) = Azure Services",
 	  "is_course_mmyy_required":"Y"
@@ -126,7 +132,9 @@
         "Azure Synapse",
         "Azure Services",
         "Data Warehouse",
-        "AI for Data Engineers"
+        "AI for Data Engineers",
+		"Apache Airflow",
+		"Microsoft Fabric"
       ],
       "wise_course_name_note": "(Azure Data Factory | Azure Synapse | Azure Services) = Azure Services",
 	  "is_course_mmyy_required":"Y"
@@ -146,7 +154,9 @@
         "Azure Synapse",
         "Azure Services",
         "Data Warehouse",
-        "AI for Data Engineers"
+        "AI for Data Engineers",
+		"Apache Airflow",
+		"Microsoft Fabric"
       ],
       "wise_course_name_note": "(Azure Data Factory | Azure Synapse | Azure Services) = Azure Services",
 	  "is_course_mmyy_required":"Y"
@@ -230,7 +240,9 @@
         "Azure Data Factory",
         "Azure Synapse",
         "Azure Services",
-        "Data Warehouse"
+        "Data Warehouse",
+		"Apache Airflow",
+		"Microsoft Fabric"
       ],
       "wise_course_name_note": "",
 	  "is_course_mmyy_required":"Y"

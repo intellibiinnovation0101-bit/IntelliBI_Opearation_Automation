@@ -2151,33 +2151,31 @@ def _build_attendance_table(att_rows: list) -> str:
     body_rows = []
     tot_enr = tot_na = tot_pres = tot_abs = 0
     for i, r in enumerate(att_rows):
-        # Att % colour now applies to the WHOLE row (background), not just the
-        # Att % cell — same thresholds/colours as before. The Att % cell keeps its
-        # stronger text colour + bold for emphasis.
         bg, tx = _email_att_color(r["att_pct"])
+        alt = "#ffffff" if i % 2 == 0 else "#f6f9fd"
         tot_enr += r["enrolled"]; tot_na += r["na"]
         tot_pres += r["present"]; tot_abs += r["absent"]
         body_rows.append(
-            f"<tr style='background:{bg};color:#1a2a48'>"
+            f"<tr style='background:{alt}'>"
             f"<td style='{td % 'left'}'>{r['tech']}</td>"
             f"<td style='{td % 'right'}'>{r['enrolled']}</td>"
             f"<td style='{td % 'right'}'>{r['na']}</td>"
             f"<td style='{td % 'right'}'>{r['present']}</td>"
             f"<td style='{td % 'right'}'>{r['absent']}</td>"
-            f"<td style='{(td % 'right')}color:{tx};font-weight:700'>"
+            f"<td style='{(td % 'right')}background:{bg};color:{tx};font-weight:700'>"
             f"{r['att_pct']:.1f}%</td>"
             f"</tr>")
     _applic = tot_pres + tot_abs
     tot_pct = round(tot_pres / _applic * 100, 1) if _applic else 0.0
     tbg, ttx = _email_att_color(tot_pct)
     total_row = (
-        f"<tr style='background:{tbg};color:#1a2a48;font-weight:700'>"
+        f"<tr style='background:#eaf0f8;font-weight:700'>"
         f"<td style='{td % 'left'}'>TOTAL</td>"
         f"<td style='{td % 'right'}'>{tot_enr}</td>"
         f"<td style='{td % 'right'}'>{tot_na}</td>"
         f"<td style='{td % 'right'}'>{tot_pres}</td>"
         f"<td style='{td % 'right'}'>{tot_abs}</td>"
-        f"<td style='{(td % 'right')}color:{ttx};font-weight:700'>"
+        f"<td style='{(td % 'right')}background:{tbg};color:{ttx};font-weight:700'>"
         f"{tot_pct:.1f}%</td>"
         f"</tr>")
     return (
@@ -2214,6 +2212,21 @@ def send_report(report_type: str, label: str, filename: str, file_bytes: bytes,
 <html><body style="font-family:Arial,sans-serif;color:#1F3864;">
 <h2 style="color:#1F3864;">📊 IntelliBI {report_type.title()} Attendance &amp; Feedback Report</h2>
 <p>Please find the {report_type} attendance &amp; feedback summary for <strong>{label}</strong>.</p>
+<table style="border-collapse:collapse;font-size:14px;">
+  <tr>
+    <td style="padding:8px 18px;background:#D6E4F0;font-weight:bold;border:1px solid #B0B0B0;">Total Sessions</td>
+    <td style="padding:8px 18px;border:1px solid #B0B0B0;">{n_sessions}</td>
+  </tr><tr>
+    <td style="padding:8px 18px;background:#D6E4F0;font-weight:bold;border:1px solid #B0B0B0;">Total Students (records)</td>
+    <td style="padding:8px 18px;border:1px solid #B0B0B0;">{n_students}</td>
+  </tr><tr>
+    <td style="padding:8px 18px;background:#FFE0E0;font-weight:bold;border:1px solid #B0B0B0;">❌ Absent</td>
+    <td style="padding:8px 18px;border:1px solid #B0B0B0;"><strong>{n_absent}</strong></td>
+  </tr><tr>
+    <td style="padding:8px 18px;background:#E8F5E9;font-weight:bold;border:1px solid #B0B0B0;">📊 Combined Attendance %</td>
+    <td style="padding:8px 18px;border:1px solid #B0B0B0;"><strong>{combined_att_pct:.1f}%</strong></td>
+  </tr>
+</table>
 {att_table}
 {cta}
 <br>

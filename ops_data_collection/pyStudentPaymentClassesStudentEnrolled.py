@@ -818,6 +818,7 @@ def enrich_students_with_profile(all_students: list, use_cache: bool = True) -> 
         }
 
     # ── Try loading enriched snapshot from cache ─────────────────────────────
+    cached_enriched = None          # prior enrichment, reused below as a fallback
     if use_cache:
         cached_enriched = _cache_get("sp_enriched", "", TTL_ENRICHED)
         if cached_enriched is not None and isinstance(cached_enriched, dict):
@@ -867,15 +868,34 @@ def enrich_students_with_profile(all_students: list, use_cache: bool = True) -> 
     print(f"[Enrich] Fetching tags, additionalNote & registration data for {total} student(s) …")
     enriched_map = {}   # student_id → {tags, additionalNote, reg_enabled, reg_status}
 
+    # Prior enrichment (if any) is used as a fallback so this full re-enrich is as
+    # resilient as the cached path: the profile API intermittently returns an EMPTY
+    # additionalNote for a student who genuinely has one, and here the v3 student
+    # carries no note of its own — so without a fallback that empty response would
+    # blank the note and every column derived from it, and then overwrite the good
+    # cached note with empty. Seeding each student from the prior cache BEFORE the
+    # fetch means an empty/failed fetch can never wipe a note that was already known.
+    prior_cache = cached_enriched if isinstance(cached_enriched, dict) else {}
+
     for idx, student in enumerate(all_students, 1):
         sid = student.get("_id") or ""
         if not sid:
             continue
-        extras = _fetch_profile_extras(sid)
-        _apply_extras(student, extras)     # empty fetch never wipes existing tags/note
+        # Seed good tags/note/registration from the prior cache first.
+        prior = prior_cache.get(sid)
+        if isinstance(prior, dict):
+            _apply_extras(student, prior)
 
-        # Collect for cache (merged values — so tags carried from the v3 feed are
-        # preserved even when the profile call returned an empty tag list).
+        extras = _fetch_profile_extras(sid)
+        if extras.get("_ok"):
+            # Successful fetch: refresh with it. A non-empty value updates; an empty
+            # value is ignored by _apply_extras, so the seeded prior note survives.
+            _apply_extras(student, extras)
+        # On a failed fetch (_ok False) the seeded prior values are kept as-is.
+
+        # Collect for cache (merged values — so tags carried from the v3 feed and a
+        # previously-known note are preserved even when this run's profile call
+        # returned an empty tag list / empty note).
         enriched_map[sid] = _cache_entry(student)
 
         if idx % 25 == 0 or idx == total:

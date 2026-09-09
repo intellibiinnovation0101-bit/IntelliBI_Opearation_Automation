@@ -164,6 +164,16 @@
       "technology_name": "GCP",
       "is_active_naming": true,
       "avg_num_of_hours": null
+    },
+	    {
+      "technology_name": "Microsoft Fabric",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
+    },
+	    {
+      "technology_name": "Apache Airflow",
+      "is_active_naming": true,
+      "avg_num_of_hours": null
     }
   ],
   "additional_keywords": [
