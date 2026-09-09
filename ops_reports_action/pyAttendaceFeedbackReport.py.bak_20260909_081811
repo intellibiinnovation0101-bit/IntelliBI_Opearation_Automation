@@ -524,23 +524,6 @@ def _session_dur_min(row) -> float:
         return 0.0
 
 
-def _ist_now() -> datetime:
-    """Current time in IST (Asia/Kolkata) as a NAIVE datetime, so it compares
-    directly with the naive IST timestamps parsed from the sheet
-    (session_start_ist). Anchoring to IST makes the report correct regardless of
-    the host machine's timezone (which may be UTC/UTC+1, etc.)."""
-    try:
-        from zoneinfo import ZoneInfo
-        return datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
-    except Exception:
-        return datetime.now()
-
-
-def _ist_today() -> date:
-    """Today's date in IST (see _ist_now)."""
-    return _ist_now().date()
-
-
 def _classify_session_type(has_attendance: bool, has_duration: bool,
                            end_blank: bool, start_raw: str) -> str:
     """Classify a session as 'normal', 'scheduled' or 'cancelled' — the single,
@@ -568,8 +551,8 @@ def _classify_session_type(has_attendance: bool, has_duration: bool,
     except (ValueError, TypeError):
         _start_dt = None
     if _start_dt is not None:
-        _is_future     = _start_dt >= _ist_now()
-        _started_today = _start_dt.date() >= _ist_today()
+        _is_future     = _start_dt >= datetime.now()
+        _started_today = _start_dt.date() >= date.today()
     else:
         _is_future = _started_today = False
     if end_blank and (_is_future or _started_today):
@@ -2149,13 +2132,9 @@ def save_to_local_directory(report_type: str, filename: str, file_bytes: bytes):
 def _build_attendance_table(att_rows: list) -> str:
     """Management-friendly per-technology attendance table for the email body.
     Columns: Tech Name | Total Enrolled | Att. N/A Count | Present | Absent | Att %.
-    The Att % cell is colour-coded (Green > 70 · Amber 55–70 · Red < 55).
-    Rows are ordered by Att % ascending (lowest attendance first); the TOTAL row
-    stays at the bottom."""
+    The Att % cell is colour-coded (Green > 70 · Amber 55–70 · Red < 55)."""
     if not att_rows:
         return ""
-    # Sort technologies by Att % ascending (tie-break by name for stable order).
-    att_rows = sorted(att_rows, key=lambda r: (r["att_pct"], str(r["tech"])))
     NAVY = "#1B355E"
     th = ("padding:8px 10px;background:%s;color:#ffffff;font-weight:600;"
           "border:1px solid #d0d7e2;font-size:13px;text-align:%s;")
@@ -3514,7 +3493,7 @@ def main():
             _config_error(f"start_date ({args.start}) must not be after end_date ({args.end})")
         label = f"{args.start.strip()} To {args.end.strip()}"
     else:
-        ref_date              = date.fromisoformat(args.date) if args.date else _ist_today()
+        ref_date              = date.fromisoformat(args.date) if args.date else date.today()
         start_date, end_date, label = get_date_range(args.type, ref_date)
 
     # ── Daily Report: widen the window to "yesterday 12:00 PM → now" ───────────
@@ -3526,8 +3505,8 @@ def main():
     yest_date    = None      # rows on this date are highlighted in the report
     if args.type == "daily":
         win_start = datetime.combine(ref_date - timedelta(days=1), time(12, 0, 0))
-        if ref_date == _ist_today():
-            win_end = _ist_now()                                      # live run (IST)
+        if ref_date == date.today():
+            win_end = datetime.now()                                  # live run
         else:
             win_end = datetime.combine(ref_date, time(23, 59, 59))    # historic --date
         daily_window = (win_start, win_end)

@@ -2149,13 +2149,9 @@ def save_to_local_directory(report_type: str, filename: str, file_bytes: bytes):
 def _build_attendance_table(att_rows: list) -> str:
     """Management-friendly per-technology attendance table for the email body.
     Columns: Tech Name | Total Enrolled | Att. N/A Count | Present | Absent | Att %.
-    The Att % cell is colour-coded (Green > 70 · Amber 55–70 · Red < 55).
-    Rows are ordered by Att % ascending (lowest attendance first); the TOTAL row
-    stays at the bottom."""
+    The Att % cell is colour-coded (Green > 70 · Amber 55–70 · Red < 55)."""
     if not att_rows:
         return ""
-    # Sort technologies by Att % ascending (tie-break by name for stable order).
-    att_rows = sorted(att_rows, key=lambda r: (r["att_pct"], str(r["tech"])))
     NAVY = "#1B355E"
     th = ("padding:8px 10px;background:%s;color:#ffffff;font-weight:600;"
           "border:1px solid #d0d7e2;font-size:13px;text-align:%s;")
