@@ -1,16 +1,15 @@
 # Scheduling — IntelliBI Operations Automation
 
 The Operations pipeline must **succeed exactly once per day**. It is scheduled at
-two times, where the later one is a **fallback/retry** window, not an extra run.
-The times are staggered off the Sales schedule (11:00 / 14:00 / 17:00 / 18:45 /
-21:00 / 23:00) so the two projects never run at the same time:
+three times, where the later two are **fallback/retry** windows, not extra runs:
 
-| 10:30 | 11:30 |
-|-------|-------|
-| normal daily run | retry **only if** 10:30 did not succeed |
+| 10:00 | 11:00 | 12:00 |
+|-------|-------|-------|
+| normal daily run | retry **only if** 10:00 did not succeed | retry **only if** neither 10:00 nor 11:00 succeeded |
 
-- If **10:30 succeeds** → 11:30 skips.
-- If **both fail** → you have two failure e-mails and the run is retried next day.
+- If **10:00 succeeds** → 11:00 and 12:00 skip.
+- If **10:00 fails but 11:00 succeeds** → 12:00 skips.
+- If all three fail → you have three failure e-mails and the run is retried next day.
 
 Each real run executes the full `scripts/run_all.py` (Layer 1 in parallel →
 Layer 2 with dependency gating) and e-mails the detailed summary log to
@@ -25,7 +24,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup_schedule.ps1
 ```
 
 That registers a single Task Scheduler task named **"IntelliBI Operations
-Automation"** with the two daily triggers. Paths are derived automatically.
+Automation"** with the three daily triggers. Paths are derived automatically.
 
 ## The once-per-day success mechanism
 
@@ -34,7 +33,7 @@ Automation"** with the two daily triggers. Paths are derived automatically.
 1. Reads the per-day **success marker** `cache/scheduler/ops_last_success.txt`
    (contains the date of the last successful run). If it equals **today**, the
    trigger logs *"already completed successfully today — skipping"* and exits.
-   This is what makes 11:30 a pure fallback.
+   This is what makes 11:00 / 12:00 pure fallbacks.
 2. Otherwise it takes the overlap lock (`cache/scheduler/ops.lock`) — if a
    previous run is still going, it skips (no double-run).
 3. It launches `scripts\run_all.py`. **Only if that exits 0** does it write
@@ -45,8 +44,8 @@ Automation"** with the two daily triggers. Paths are derived automatically.
 starts as soon as it powers on (still subject to the once-per-day gate).
 
 > Note: the windows are one hour apart. Keep a normal run comfortably under an
-> hour; if a 10:30 run is still going at 11:30, the 11:30 trigger correctly skips
-> (overlap protection) and the 10:30 run is allowed to finish.
+> hour; if a 10:00 run is still going at 11:00, the 11:00 trigger correctly skips
+> (overlap protection) and the 10:00 run is allowed to finish.
 
 ## Verify / manage
 
@@ -70,4 +69,3 @@ Manual test without the scheduler:
 
 ## Change history
 - 2026-08-24 — Added scheduling (10:00 normal + 11:00/12:00 retry-until-success, once per day, overlap-protected) via `run_scheduled.py` + `setup_schedule.ps1`.
-- 2026-09-11 — Changed schedule to 10:30 normal + 11:30 retry (removed 12:00), staggered off the Sales schedule so the two projects never run at the same time. Re-run `setup_schedule.ps1` as Administrator to apply.
