@@ -14,23 +14,27 @@
     4. Feedback Rating    — session-level feedback stats
 
   Usage:
-    Execution is controlled by the RUN CONFIGURATION va
-    riables near the top of
-    this file (report_type / report_date / start_date / end_date / send_email),
-    then simply run:
+    Execution is controlled by the RUN CONFIGURATION variables near the top of
+    this file — no command-line arguments. Then simply run:
 
         python pyAttendaceFeedbackReport.py
 
-    Examples (edit the variables, then run):
-        report_type = "daily"                                  # daily (default)
-        report_type = "weekly"                                 # weekly
-        report_type = "fortnightly"                            # fortnightly
-        report_type = "monthly"                                # monthly
-        report_type = "quarterly"                              # quarterly
-        report_type = "yearly"                                 # yearly
-        report_type = "daily";  report_date = "2026-03-29"     # specific date
-        report_type = "daily";  send_email  = False            # skip email
-        report_type = "manual"; start_date = "01-Feb-2026"; end_date = "31-Mar-2026"
+    GENERATE_AUTO = True  → the script decides from today's date:
+        • Daily every day
+        • Weekly every Monday (previous complete Mon–Sun)
+        • Fortnightly on the 15th (1st–15th)
+        • Monthly on the last day of the month (recovered on the 1st of next
+          month if missed; produced exactly once via a cache/ marker)
+
+    GENERATE_AUTO = False → the individual flags decide (multiple may be True in
+    one run); optional period variables pin each window:
+        GENERATE_DAILY / GENERATE_WEEKLY / GENERATE_MONTHLY /
+        GENERATE_FORTNIGHTLY / GENERATE_QUARTERLY / GENERATE_MANUAL
+        DAILY_DATE / WEEKLY_REFERENCE_DATE / MONTHLY_MONTH+MONTHLY_YEAR /
+        FORTNIGHTLY_DATE / QUARTERLY_DATE / MANUAL_START_DATE+MANUAL_END_DATE
+
+    All report calculations, metrics, charts and e-mail logic are unchanged; this
+    block only decides WHICH report generates and for WHAT reporting period.
 ================================================================================
 """
 
@@ -78,29 +82,53 @@ REPORT_TO      = ["info@intellibiinnovationstechnologies.in","intellibihropsb2ch
 REPORT_CC      = []                            # optional: ["other@email.com"]
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  RUN CONFIGURATION  (replaces the old command-line arguments)
-#  Execution is controlled entirely by the variables below — edit them instead
-#  of passing CLI flags.
-#    report_type : "daily" (default) | "weekly" | "fortnightly" | "monthly"
-#                  | "quarterly" | "yearly" | "manual"
-#    report_date : specific reference date as "YYYY-MM-DD", or None = today.
-#                  (Used by the non-manual report types; e.g. a back-dated daily run.)
-#    start_date  : manual-range START date "DD-Mon-YYYY" (e.g. "01-Feb-2026").
-#                  Required only when report_type == "manual".
-#    end_date    : manual-range END date "DD-Mon-YYYY" (e.g. "31-Mar-2026").
-#                  Required only when report_type == "manual".
-#    send_email  : True  -> build the report AND email it (default).
-#                  False -> build the report but skip sending email (old --no-email).
-#    upload_to_local_directory : True  -> ALSO save the report to the local
-#                  computer directory (LOCAL_UPLOAD_DIR). False -> skip that save
-#                  only. The Google Drive upload is unaffected either way.
+#  RUN CONFIGURATION  (variable-driven; no command-line arguments)
+#  ---------------------------------------------------------------------------
+#  This block ONLY decides WHICH reports are generated and for WHAT reporting
+#  period. Every existing calculation, report, metric, chart, e-mail and
+#  business rule is reused exactly as-is (see _run_single below).
+#
+#  (A) GENERATE_AUTO = True  → the script decides automatically from today's
+#      date (scheduler-friendly; the manual flags below are IGNORED):
+#         • Daily        → every run (current day).
+#         • Weekly       → every Monday, for the previous COMPLETE week
+#                          (previous Monday → previous Sunday).
+#         • Fortnightly  → on the 15th, for the 1st → 15th of the month.
+#         • Monthly      → on the last calendar day of the month, for that whole
+#                          month (1st → last day). If that run is missed or
+#                          fails, it is recovered automatically on the 1st of the
+#                          next month for the previous month — produced exactly
+#                          once, tracked by a small marker file in cache/.
+#      (Quarterly is not auto-scheduled; use GENERATE_QUARTERLY in manual mode.)
+#
+#  (B) GENERATE_AUTO = False → the individual flags below decide. Multiple may be
+#      True in one run; each report is generated independently. The optional
+#      period variables pin the reporting window (None = existing default).
 # ─────────────────────────────────────────────────────────────────────────────
-report_type = "daily"
-report_date = None
-start_date  = None
-end_date    = None
-send_email  = True
-upload_to_local_directory = False
+GENERATE_AUTO = True
+
+# Manual selection flags (used ONLY when GENERATE_AUTO = False)
+GENERATE_DAILY        = True
+GENERATE_WEEKLY       = True
+GENERATE_MONTHLY      = True
+GENERATE_MANUAL       = False        # Manual = a custom start/end date range
+GENERATE_FORTNIGHTLY  = True
+GENERATE_QUARTERLY    = True
+
+# Optional reporting-period overrides (used ONLY when GENERATE_AUTO = False).
+# None → keep the existing/default behavior for that report type.
+DAILY_DATE            = None         # "YYYY-MM-DD" — a specific day (default: today)
+WEEKLY_REFERENCE_DATE = None         # "YYYY-MM-DD" — any date within the wanted week
+MONTHLY_MONTH         = None         # 1-12   (default: current month)
+MONTHLY_YEAR          = None         # e.g. 2026 (default: current year)
+FORTNIGHTLY_DATE      = None         # "YYYY-MM-DD" — any date in the wanted month (its 1st→15th)
+QUARTERLY_DATE        = None         # "YYYY-MM-DD" — any date within the wanted quarter
+MANUAL_START_DATE     = None         # "YYYY-MM-DD" — required when GENERATE_MANUAL = True
+MANUAL_END_DATE       = None         # "YYYY-MM-DD" — required when GENERATE_MANUAL = True
+
+# Output behavior (unchanged)
+send_email  = True                   # True → build AND e-mail; False → build only
+upload_to_local_directory = False    # True → also save under LOCAL_UPLOAD_DIR
 
 # Base local computer directory used only when upload_to_local_directory = True.
 # The report is saved under a per-report-type subfolder (e.g. "Daily") to mirror
@@ -3470,23 +3498,60 @@ def generate_period_report(report_type: str, label: str,
     return wb
 
 
-def main():
-    # ── Execution is controlled by the RUN CONFIGURATION variables at the top of
-    #    this file (report_type / report_date / start_date / end_date / send_email),
-    #    replacing the previous command-line arguments. They are gathered into a
-    #    lightweight namespace so the report-generation logic below is unchanged.
-    #    NOTE: start_date / end_date are read via globals() because both names are
-    #    also reused as local variables (the resolved date objects) further down.
-    from types import SimpleNamespace
-    _cfg = globals()
-    args = SimpleNamespace(
-        type=report_type,
-        date=report_date,
-        start=_cfg.get("start_date"),
-        end=_cfg.get("end_date"),
-        no_email=not send_email,
-    )
+# ─────────────────────────────────────────────────────────────────────────────
+#  MONTHLY once-per-month marker — drives the GENERATE_AUTO last-day /
+#  1st-of-next-month recovery so the Monthly report is produced exactly once.
+#  Stored as a tiny JSON file in cache/.
+# ─────────────────────────────────────────────────────────────────────────────
+_REPORT_STATE_FILE = os.path.join(PROJECT_CACHE_DIR, "attendance_report_state.json")
 
+
+def _load_report_state() -> dict:
+    import json
+    try:
+        with open(_REPORT_STATE_FILE, "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _monthly_done(year: int, month: int) -> bool:
+    return f"{year:04d}-{month:02d}" in (_load_report_state().get("monthly_done") or [])
+
+
+def _mark_monthly_done(year: int, month: int) -> None:
+    import json
+    key = f"{year:04d}-{month:02d}"
+    state = _load_report_state()
+    done = state.get("monthly_done") or []
+    if key not in done:
+        done.append(key)
+        state["monthly_done"] = done[-24:]          # keep only the last 24 months
+        try:
+            os.makedirs(PROJECT_CACHE_DIR, exist_ok=True)
+            with open(_REPORT_STATE_FILE, "w", encoding="utf-8") as fh:
+                json.dump(state, fh, indent=2)
+            print(f"[State] Monthly marker recorded for {key}.")
+        except Exception as e:
+            print(f"[State] Could not write monthly marker ({key}): {e}")
+
+
+def _run_single(args):
+    """Generate ONE report for the fully-resolved `args` namespace.
+
+    This is the original main() body, UNCHANGED — every calculation, report,
+    metric, chart and e-mail path below is identical. Only the selection and the
+    reporting period are decided by the caller (main). `args` fields:
+        type          — daily | weekly | fortnightly | monthly | quarterly | yearly | manual
+        date          — "YYYY-MM-DD" reference (daily / default path) or None
+        start, end    — manual-range strings "DD-Mon-YYYY" (type == "manual")
+        period_start, period_end, period_label — an EXPLICIT window (date objects)
+                        passed by the controller for weekly / monthly /
+                        fortnightly / quarterly, so the exact requested period is
+                        fed straight into the existing report logic
+        no_email      — True → skip the e-mail send
+    """
     def _config_error(msg):
         """Report an invalid RUN CONFIGURATION and exit (mirrors old parser.error)."""
         print(f"[Config Error] {msg}", file=sys.stderr)
@@ -3513,6 +3578,14 @@ def main():
         if start_date > end_date:
             _config_error(f"start_date ({args.start}) must not be after end_date ({args.end})")
         label = f"{args.start.strip()} To {args.end.strip()}"
+    elif getattr(args, "period_start", None) is not None:
+        # Explicit reporting window chosen by the controller (weekly / monthly /
+        # fortnightly / quarterly). Bypasses get_date_range so the exact requested
+        # period flows straight into the existing report logic — everything
+        # downstream (builders, trends, folder, filename, e-mail) is unchanged.
+        start_date = args.period_start
+        end_date   = args.period_end
+        label      = args.period_label
     else:
         ref_date              = date.fromisoformat(args.date) if args.date else _ist_today()
         start_date, end_date, label = get_date_range(args.type, ref_date)
@@ -3650,6 +3723,158 @@ def main():
     print(f"\n{sep}")
     print(f"  Done.  Sessions: {len(sess_f)} | Students: {n_total} | Absent: {n_absent} | Suspended: {n_suspended} | Combined Att%: {combined_att_pct:.1f}%")
     print(f"{sep}\n")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  CONTROLLER — decides WHICH report(s) to generate and WITH WHAT period, then
+#  runs each through the unchanged _run_single(). Two modes (see RUN
+#  CONFIGURATION at the top of this file): GENERATE_AUTO (date-driven schedule)
+#  or the individual GENERATE_* flags.
+# ─────────────────────────────────────────────────────────────────────────────
+def main():
+    from types import SimpleNamespace
+
+    today    = _ist_today()
+    no_email = not send_email
+
+    def _ymd(s):
+        """'YYYY-MM-DD' → date, or None."""
+        return datetime.strptime(s.strip(), "%Y-%m-%d").date() if s else None
+
+    def _job(**kw):
+        base = dict(type=None, date=None, start=None, end=None, no_email=no_email,
+                    period_start=None, period_end=None, period_label=None, mark=None)
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    # period-label formats mirror the existing get_date_range() conventions so
+    # filenames / titles / Drive names stay consistent.
+    def _week_label(mon, sun):
+        return f"{mon.strftime('%d %b')} – {sun.strftime('%d %b %Y')}"
+
+    def _month_label(ms):
+        return ms.strftime("%B %Y")
+
+    def _fortnight_label(fs, fe):
+        return f"{fs.strftime('%d %b')} – {fe.strftime('%d %b %Y')}"
+
+    def _quarter_label(qs):
+        return f"Q{(qs.month - 1) // 3 + 1} {qs.year}"
+
+    jobs = []
+
+    if GENERATE_AUTO:
+        # ── AUTO: decide purely from today's date (manual flags ignored) ──────
+        # Daily — every run.
+        jobs.append(_job(type="daily", date=today.isoformat()))
+
+        # Weekly — every Monday, for the previous COMPLETE week (prev Mon–Sun).
+        if today.weekday() == 0:                       # 0 = Monday
+            mon, sun = _period_for_date("weekly", today - timedelta(days=7))
+            jobs.append(_job(type="weekly", period_start=mon, period_end=sun,
+                             period_label=_week_label(mon, sun)))
+
+        # Fortnightly — on the 15th, for the 1st → 15th of this month.
+        if today.day == 15:
+            fs = date(today.year, today.month, 1)
+            fe = date(today.year, today.month, 15)
+            jobs.append(_job(type="fortnightly", period_start=fs, period_end=fe,
+                             period_label=_fortnight_label(fs, fe)))
+
+        # Monthly — on the last day of the month; recovered on the 1st of the
+        # next month if the last-day run was missed/failed. Produced exactly once
+        # per month (marker file). "mark" is written only after a successful run.
+        last_day = calendar.monthrange(today.year, today.month)[1]
+        if today.day == last_day and not _monthly_done(today.year, today.month):
+            ms = date(today.year, today.month, 1)
+            me = date(today.year, today.month, last_day)
+            jobs.append(_job(type="monthly", period_start=ms, period_end=me,
+                             period_label=_month_label(ms), mark=(today.year, today.month)))
+        elif today.day == 1:
+            prev = today - timedelta(days=1)           # last day of previous month
+            if not _monthly_done(prev.year, prev.month):
+                pl = calendar.monthrange(prev.year, prev.month)[1]
+                ms = date(prev.year, prev.month, 1)
+                me = date(prev.year, prev.month, pl)
+                jobs.append(_job(type="monthly", period_start=ms, period_end=me,
+                                 period_label=_month_label(ms), mark=(prev.year, prev.month)))
+    else:
+        # ── MANUAL: individual flags; multiple may be True in one run ─────────
+        if GENERATE_DAILY:
+            ref = _ymd(DAILY_DATE) or today
+            jobs.append(_job(type="daily", date=ref.isoformat()))
+
+        if GENERATE_WEEKLY:
+            ref = _ymd(WEEKLY_REFERENCE_DATE) or today
+            mon, sun = _period_for_date("weekly", ref)     # week CONTAINING ref
+            jobs.append(_job(type="weekly", period_start=mon, period_end=sun,
+                             period_label=_week_label(mon, sun)))
+
+        if GENERATE_MONTHLY:
+            y = MONTHLY_YEAR or today.year
+            m = MONTHLY_MONTH or today.month
+            last = calendar.monthrange(y, m)[1]
+            ms, me = date(y, m, 1), date(y, m, last)
+            jobs.append(_job(type="monthly", period_start=ms, period_end=me,
+                             period_label=_month_label(ms)))
+
+        if GENERATE_FORTNIGHTLY:
+            ref = _ymd(FORTNIGHTLY_DATE) or today
+            fs = date(ref.year, ref.month, 1)
+            fe = date(ref.year, ref.month, 15)
+            jobs.append(_job(type="fortnightly", period_start=fs, period_end=fe,
+                             period_label=_fortnight_label(fs, fe)))
+
+        if GENERATE_QUARTERLY:
+            ref = _ymd(QUARTERLY_DATE) or today
+            qs, qe = _period_for_date("quarterly", ref)     # quarter CONTAINING ref
+            jobs.append(_job(type="quarterly", period_start=qs, period_end=qe,
+                             period_label=_quarter_label(qs)))
+
+        if GENERATE_MANUAL:
+            ms, me = _ymd(MANUAL_START_DATE), _ymd(MANUAL_END_DATE)
+            if not (ms and me):
+                print("[Manual] GENERATE_MANUAL is on but MANUAL_START_DATE / "
+                      "MANUAL_END_DATE are not set — skipping the Manual report.")
+            elif ms > me:
+                print(f"[Manual] MANUAL_START_DATE ({MANUAL_START_DATE}) is after "
+                      f"MANUAL_END_DATE ({MANUAL_END_DATE}) — skipping the Manual report.")
+            else:
+                # Existing manual path expects DD-Mon-YYYY strings — convert once.
+                jobs.append(_job(type="manual",
+                                 start=ms.strftime("%d-%b-%Y"),
+                                 end=me.strftime("%d-%b-%Y")))
+
+    if not jobs:
+        print("[Config] Nothing to generate for this run "
+              "(GENERATE_AUTO is False and no GENERATE_* flag matched).")
+        return
+
+    mode = "AUTO" if GENERATE_AUTO else "MANUAL"
+    bar = "#" * 64
+    print(f"\n{bar}\n  IntelliBI Attendance & Feedback Report — {mode} mode")
+    print(f"  Today (IST): {today}   |   Queued: {', '.join(a.type for a in jobs)}")
+    print(f"{bar}")
+
+    failures = 0
+    for args in jobs:
+        try:
+            _run_single(args)
+            if getattr(args, "mark", None):
+                _mark_monthly_done(*args.mark)
+        except SystemExit:
+            raise
+        except Exception as e:
+            failures += 1
+            import traceback
+            print(f"[Error] {args.type} report failed: {e}")
+            traceback.print_exc()
+
+    done = len(jobs) - failures
+    print(f"\n{bar}\n  Run complete — {done}/{len(jobs)} report(s) generated"
+          f"{f', {failures} FAILED' if failures else ''}.\n{bar}\n")
+    if failures:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

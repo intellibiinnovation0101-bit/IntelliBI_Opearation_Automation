@@ -1,0 +1,50 @@
+{
+  "_comment": "Tuning for pyCoordinatorAttendanceTaskReport.py. This file is OPTIONAL — the script self-defaults if it is absent. Change values here; no code edit needed. Weights should sum to 100 so the Attention Score stays 0-100.",
+
+  "drive": {
+    "parent_folder_id": "1BEokUc7Np7iBVSMwIyMAgZUa0mrecT-h",
+    "impersonate_user": "info@intellibiinnovationstechnologies.in",
+    "day_folder_format": "%Y-%m-%d",
+    "sheet_title_prefix": "Coordinator Attendance Tasks",
+    "share_with": []
+  },
+
+  "sources": {
+    "attendance_sheet_id": "1TqDjq4gAyo32eRNMbuLd6uu0eCNZb7h1j5YH-q68AhU",
+    "students_sheet_id": "1Eq7Q3Gota7nYiaorm1L0NoouVfYtS7JkbBp4U5MWzVA",
+    "sessions_tab": "Sessions",
+    "attendance_tab": "Attendance",
+    "student_feedback_tab": "Student_Feedback",
+    "students_tab": "Students"
+  },
+
+  "scoring": {
+    "attendance_target_pct": 75,
+    "attendance_critical_pct": 60,
+    "trend_window_sessions": 5,
+    "streak_flag": 3,
+    "rating_good": 7.0,
+    "rating_low": 5.0,
+    "min_present_for_feedback": 2,
+    "weights": {
+      "overall_attendance": 30,
+      "latest_absent": 15,
+      "absent_streak": 20,
+      "recent_trend": 10,
+      "feedback_participation": 12,
+      "feedback_rating": 8,
+      "feedback_volume": 5
+    },
+    "band_cutoffs": {"critical": 65, "high": 45, "medium": 30}
+  },
+
+  "options": {
+    "action_taken": ["Call", "WhatsApp", "Email", "In-person", "Parent contacted", "No response", "Not required", "Other"],
+    "outcome": ["Completed", "In Progress", "Pending", "No Response", "Escalated", "Not Required"],
+    "follow_up_done": ["Yes", "No"]
+  },
+
+  "email": {
+    "recipients": ["info@intellibiinnovationstechnologies.in"]
+  }
+}
