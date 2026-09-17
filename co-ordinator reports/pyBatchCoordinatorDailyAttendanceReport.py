@@ -166,6 +166,7 @@ INSTR_LOW_RATING        = 7.0    # (period roll-up) session avg rating <= this =
 # ── Instructor Follow-Ups (daily) — session follow-up thresholds ─────────────
 INSTR_EARLY_MIN         = 5.0    # instructor expected to start >= this many min BEFORE scheduled
 INSTR_UNDERRUN_MIN      = 30.0   # Diff Mins <= -this (ran this many min short) = Session Underrun
+INSTR_LOW_FB_RATE_PCT   = 25.0   # student Feedback Rate % <= this = Low Feedback Rate follow-up
 
 INSTR_COLS = [
     "Tech Name", "Duration", "Instructor", "Phone", "Session Date",
@@ -822,6 +823,15 @@ def build_instructor_followups(ws, sess_daily, att_daily, fb_daily, tf_daily,
             if not fb_given:
                 reasons.append([("Feedback Missing", True),
                                 (" — instructor feedback for this session is pending. Message Instructor.", False)])
+            # 6. Low Feedback Rate (student feedback participation <= 25%) →
+            #    Coordinator asks students to submit their feedback. Combined into
+            #    this session's existing reasons (never a duplicate record).
+            if n_present > 0 and fb_rt <= INSTR_LOW_FB_RATE_PCT:
+                reasons.append([("Low Feedback Rate", True), (": Only ", False),
+                                (f"{n_fb} of {n_present}", True),
+                                (" students submitted feedback (", False),
+                                (f"{fb_rt:g}%", True), (") — ", False),
+                                ("Ask students to submit their session feedback.", True)])
         if not reasons:
             continue
 
@@ -2225,24 +2235,15 @@ def _generate_daily(service, report_date, sess_agg, att_agg, fb_agg, tf_agg, sus
     agg_map = build_aggregates(_le_date(att_agg, report_date), _le_date(fb_agg, report_date), cfg)
     log.info("Computed aggregates for %d (student × tech × duration) group(s).", len(agg_map))
 
-    # ── previous-day per-course trends — same as the existing daily report ────
-    try:
-        prev_ss, prev_fb, prev_sd = AR._collect_daily_trends(service, report_date)
-    except Exception as _te:
-        log.warning("Daily trends unavailable (%s) — trend columns show '—'.", _te)
-        prev_ss, prev_fb, prev_sd = {}, {}, {}
-
     # ── instructor phone directory (Instructor master; Is_Active=Y) ───────────
     instr_phones = load_instructor_phones(service)
     log.info("Instructor phone directory: %d name(s).", len(instr_phones))
 
-    # ── build workbook: Session Summary + Learner Follow-Ups + Instructor
-    #    Follow-Ups + Feedback Rating + Teacher_No_Feedback ────────────────────
+    # ── build workbook: Learner Attendance Follow-Ups + Learner Assignment
+    #    Follow-Ups + Learner Admission Formalities + Learner Wise Validation +
+    #    Instructor Follow-Ups ──────────────────────────────────────────────────
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
-    AR.build_session_summary(wb.create_sheet("Session Summary"),
-                             sess_daily, att_daily, "daily", label,
-                             fb_f=fb_daily, prev_trend=prev_ss, yest_date=yest_date)
     build_student_detail_ext(wb.create_sheet("Learner Attendance Follow-Ups"),
                              att_daily, susp_daily, fb_daily, agg_map, report_date,
                              yest_date=yest_date)
@@ -2261,12 +2262,6 @@ def _generate_daily(service, report_date, sess_agg, att_agg, fb_agg, tf_agg, sus
     build_instructor_followups(wb.create_sheet("Instructor Follow-Ups"),
                                sess_daily, att_daily, fb_daily, tf_daily,
                                instr_phones, report_date)
-    AR.build_feedback_rating(wb.create_sheet("Feedback Rating"),
-                             sess_daily, att_daily, fb_daily, "daily", label,
-                             prev_trend=prev_fb, yest_date=yest_date)
-    AR.build_teacher_no_feedback(wb.create_sheet("Teacher_No_Feedback"),
-                                 sess_daily, tf_daily, "daily", label,
-                                 att_f=att_daily, yest_date=yest_date)
     buf = io.BytesIO()
     wb.save(buf)
     # Filename carries the report period ("duration"), same convention/transform

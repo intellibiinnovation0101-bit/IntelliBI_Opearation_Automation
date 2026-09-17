@@ -105,7 +105,7 @@ TTL_ATT_DETAIL  = 24 * 3600    # 24 hours — past session attendance won't chan
 #   "cache"         -> use the file cache (default).
 #   "force-refresh" -> bypass the cache and fetch everything fresh from the API.
 # NOTE: the separate --full-load CLI flag is unchanged.
-REFRESH_MODE = "cache"
+REFRESH_MODE = "force-refresh"
 
 def _ensure_cache_dirs():
     """Create cache directory structure if missing."""
