@@ -107,7 +107,6 @@ TTL_ATT_DETAIL  = 24 * 3600    # 24 hours — past session attendance won't chan
 # NOTE: the separate --full-load CLI flag is unchanged.
 REFRESH_MODE = "cache"
 
-
 def _ensure_cache_dirs():
     """Create cache directory structure if missing."""
     for sub in ["", "suspended", "attendance_detail"]:
@@ -210,7 +209,9 @@ def _fetch_class_instructor_map() -> dict:
 
 SESSIONS_COLUMNS = [
     "session_id", "course_name", "course_title", "tutor_name", "Instructor_Name",
-    "start_time_ist", "end_time_ist", "synced_at",
+    "start_time_ist", "end_time_ist",
+    "Session Scheduled Start", "Session Scheduled End",
+    "synced_at",
 ]
 ATTENDANCE_COLUMNS = [
     "session_id", "course_name", "course_title", "student_id", "student_name",
@@ -233,6 +234,29 @@ SESSIONS_NO_TF_COLUMNS = [
     "start_time_ist", "end_time_ist", "synced_at", "remark",
 ]
 WATERMARK_COLUMNS = ["sync_key", "load_type", "last_sync_time", "total_synced"]
+
+# Candidate API field names for the SCHEDULED session slot (planned start/end).
+# The wiseapp session object exposes the scheduled slot under one of these names;
+# the first present, non-empty value wins. Kept SEPARATE from the actual/conducted
+# start_time_ist / end_time_ist. Actual-only end fields (completedAt / closedAt /
+# meetingEndTime) are deliberately NOT used for the scheduled end. If your API uses
+# a different key, add it to the front of the relevant list.
+_SCHED_START_FIELDS = ["scheduledStartTime", "scheduledStart", "scheduled_start_time",
+                       "scheduledStartDate", "plannedStartTime", "sessionStartTime",
+                       "startTime", "start_time", "startDate"]
+_SCHED_END_FIELDS   = ["scheduledEndTime", "scheduledEnd", "scheduled_end_time",
+                       "scheduledEndDate", "plannedEndTime", "sessionEndTime",
+                       "endTime", "end_time"]
+
+
+def _first_present(d, keys):
+    """Return the first non-empty value among `keys` in dict `d`, else ''."""
+    for k in keys:
+        v = d.get(k)
+        if v not in (None, ""):
+            return v
+    return ""
+
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -298,28 +322,66 @@ def get_sheets_service():
 #  SHARED UTILITIES
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _col_letter(idx0: int) -> str:
+    """0-based column index → spreadsheet letter(s). 0→A, 25→Z, 26→AA …"""
+    s = ""
+    n = idx0 + 1
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def _migrate_sheet_layout(service, sheet_name, old_header, new_columns):
+    """Re-align an existing tab from `old_header` to `new_columns` BY COLUMN NAME
+    and rewrite the header + all rows, so adding/inserting a column never leaves
+    historical rows shifted. Columns new in `new_columns` become blank; dropped
+    columns are removed. Mirrors the shared upsert helper; only called when the
+    header actually differs (a one-time migration)."""
+    last_col = _col_letter(max(len(old_header), len(new_columns)) - 1)
+    res = (
+        service.spreadsheets().values()
+        .get(spreadsheetId=SHEET_ID, range=f"{sheet_name}!A1:{last_col}")
+        .execute()
+    )
+    allv = res.get("values", [])
+    data_rows = allv[1:] if len(allv) > 1 else []
+    pos = {name: i for i, name in enumerate(old_header)}
+    realigned = [[(r[pos[c]] if (c in pos and pos[c] < len(r)) else "")
+                  for c in new_columns] for r in data_rows]
+    service.spreadsheets().values().update(
+        spreadsheetId=SHEET_ID,
+        range=f"{sheet_name}!A1",
+        valueInputOption="RAW",
+        body={"values": [new_columns] + realigned},
+    ).execute()
+    print(f"[Write → {sheet_name}] Column layout changed — header + "
+          f"{len(realigned)} row(s) re-aligned by name.")
+
+
 def append_rows_with_retry(service, sheet_name: str, rows: list, columns: list, max_retries: int = 5):
     """
     Append rows to a sheet tab. Creates the header row on first run if the tab
     is empty. Retries on HTTP 429 with exponential backoff.
     """
-    if not rows:
-        print(f"[Write → {sheet_name}] No rows to append.")
-        return
-
-    # ── Ensure header exists ──────────────────────────────────────────────────
+    # ── Ensure header exists AND matches the current column layout ─────────────
+    # If the layout changed (e.g. new columns added), migrate the existing header
+    # + rows by column NAME so no row is left shifted. Only rewrites on a genuine
+    # difference; a tab whose header already matches is left untouched.
+    # NOTE: this runs BEFORE the "no new rows" check, so a column-layout change is
+    # applied to the live sheet even on an incremental run that fetched 0 new rows.
     try:
-        result = (
+        hdr_res = (
             service.spreadsheets().values()
-            .get(spreadsheetId=SHEET_ID, range=f"{sheet_name}!A1:A1")
+            .get(spreadsheetId=SHEET_ID, range=f"{sheet_name}!1:1")
             .execute()
         )
-        header_exists = bool(result.get("values"))
+        existing_header = (hdr_res.get("values") or [[]])[0]
     except HttpError as e:
         print(f"[Write → {sheet_name}] Error checking header: {e}")
         return
 
-    if not header_exists:
+    if not existing_header:
         service.spreadsheets().values().update(
             spreadsheetId=SHEET_ID,
             range=f"{sheet_name}!A1",
@@ -327,6 +389,13 @@ def append_rows_with_retry(service, sheet_name: str, rows: list, columns: list, 
             body={"values": [columns]},
         ).execute()
         print(f"[Write → {sheet_name}] Header row created.")
+    elif existing_header != columns:
+        _migrate_sheet_layout(service, sheet_name, existing_header, columns)
+
+    # No new rows this cycle — the header/layout above is already reconciled.
+    if not rows:
+        print(f"[Write → {sheet_name}] No new rows to append.")
+        return
 
     # ── Build value matrix in column order ────────────────────────────────────
     value_matrix = [[str(row.get(col, "")) for col in columns] for row in rows]
@@ -866,6 +935,11 @@ def transform(all_sessions: list, watermarks: dict, synced_at: str,
 
         has_tf      = bool(session.get("teacherFeedback") or session.get("tutorFeedback"))
 
+        # Scheduled session slot (planned start/end) → IST. Kept separate from the
+        # actual/conducted start_time_ist / end_time_ist above.
+        sched_s_ist = to_ist(_first_present(session, _SCHED_START_FIELDS))
+        sched_e_ist = to_ist(_first_present(session, _SCHED_END_FIELDS))
+
         # ── SESSIONS ──────────────────────────────────────────────────────────
         if sid and sid not in seen["s"] and is_new(s_ist, "Sessions", watermarks):
             seen["s"].add(sid)
@@ -880,6 +954,8 @@ def transform(all_sessions: list, watermarks: dict, synced_at: str,
                 "Instructor_Name": instructor_name,
                 "start_time_ist": s_ist,
                 "end_time_ist":   e_ist,
+                "Session Scheduled Start": sched_s_ist,
+                "Session Scheduled End":   sched_e_ist,
                 "synced_at":      synced_at,
             })
 
@@ -1093,7 +1169,12 @@ def write_all_tabs(service, transformed: dict):
             except HttpError as e:
                 print(f"[Write → {tab_name}] Error recreating tab: {e}")
 
-        if rows:
+        # Sessions is UPSERTED by session_id (dedupe + in-place update), except on
+        # a forced full reload where the tab was just recreated empty (plain append
+        # is correct and cannot duplicate). All other tabs stay append-only.
+        if key == "Sessions" and key not in FORCE_FULL_LOAD_SHEETS:
+            upsert_sessions(service, rows)
+        elif rows:
             append_rows_with_retry(service, tab_name, rows, columns)
         else:
             print(f"[Write → {tab_name}] 0 new rows — nothing to append.")
@@ -1205,6 +1286,190 @@ def backfill_session_end_times(service):
         print(f"[Backfill] ⚠ Error during backfill: {e}")
 
 
+def sync_session_actual_times(service):
+    """ONE SOURCE OF TRUTH for the ACTUAL session start/end.
+
+    Aligns Sessions.start_time_ist / end_time_ist to the authoritative actual
+    times recorded per participant in Attendance (session_start_ist /
+    session_end_ist) — the same values the portal and the Student/Teacher feedback
+    tabs show. The Sessions row can lag: the first same-day sync often records the
+    SCHEDULED start, and when the finalised ACTUAL start is EARLIER the start-time
+    watermark refuses to re-admit it (is_new is strict >), so Sessions keeps the
+    scheduled value while Attendance already holds the actual. This step copies the
+    authoritative Attendance value onto the Sessions row so both agree. For each
+    session the value from the LATEST-synced attendance row wins. Generic — updates
+    only the cells that differ; never touches sessions with no attendance."""
+    print("\n[Sync] Aligning Sessions actual start/end with Attendance …")
+    try:
+        srows = _read_tab_values(service, SESSIONS_TAB)
+        arows = _read_tab_values(service, ATTENDANCE_TAB)
+        if len(srows) < 2 or len(arows) < 2:
+            print("[Sync] Sessions or Attendance empty — skipping.")
+            return
+        sh = [str(h).strip() for h in srows[0]]
+        spos = {h: i for i, h in enumerate(sh)}
+        ah = [str(h).strip() for h in arows[0]]
+        apos = {h: i for i, h in enumerate(ah)}
+        if any(c not in spos for c in ("session_id", "start_time_ist", "end_time_ist")):
+            print("[Sync] Sessions columns missing — skipping.")
+            return
+        if any(c not in apos for c in ("session_id", "session_start_ist", "session_end_ist")):
+            print("[Sync] Attendance columns missing — skipping.")
+            return
+
+        a_sid, a_ss, a_se = apos["session_id"], apos["session_start_ist"], apos["session_end_ist"]
+        a_sy = apos.get("synced_at")
+
+        def _v(row, i):
+            return str(row[i]).strip() if (i is not None and i < len(row) and row[i] is not None) else ""
+
+        # authoritative (start, end) per session from the LATEST-synced attendance row
+        best = {}   # sid -> [synced_key, start, end]
+        for row in arows[1:]:
+            sid = _v(row, a_sid)
+            if not sid:
+                continue
+            ss, se = _v(row, a_ss), _v(row, a_se)
+            syn = _v(row, a_sy)
+            cur = best.get(sid)
+            if cur is None:
+                best[sid] = [syn, ss, se]
+            else:
+                if syn >= cur[0]:          # newer sync wins, coalescing non-blank
+                    cur[0] = syn
+                    if ss:
+                        cur[1] = ss
+                    if se:
+                        cur[2] = se
+                else:
+                    if not cur[1] and ss:
+                        cur[1] = ss
+                    if not cur[2] and se:
+                        cur[2] = se
+
+        s_sid = spos["session_id"]
+        s_start_L = _col_letter(spos["start_time_ist"])
+        s_end_L = _col_letter(spos["end_time_ist"])
+        updates = []
+        n_start = n_end = 0
+        for ri, row in enumerate(srows[1:], start=2):
+            sid = _v(row, s_sid)
+            if not sid or sid not in best:
+                continue
+            _syn, a_start, a_end = best[sid]
+            cur_s = _v(row, spos["start_time_ist"])
+            cur_e = _v(row, spos["end_time_ist"])
+            if a_start and a_start != cur_s:
+                updates.append({"range": f"{SESSIONS_TAB}!{s_start_L}{ri}", "values": [[a_start]]})
+                n_start += 1
+            if a_end and a_end != cur_e:
+                updates.append({"range": f"{SESSIONS_TAB}!{s_end_L}{ri}", "values": [[a_end]]})
+                n_end += 1
+
+        if not updates:
+            print("[Sync] Sessions actual start/end already match Attendance.")
+            return
+        service.spreadsheets().values().batchUpdate(
+            spreadsheetId=SHEET_ID, body={"valueInputOption": "RAW", "data": updates}).execute()
+        print(f"[Sync] ✓ Aligned start_time_ist for {n_start} and end_time_ist for {n_end} session(s) "
+              f"from Attendance.")
+    except Exception as e:
+        print(f"[Sync] ⚠ Error aligning session times: {e}")
+
+
+def _col_letter(idx0: int) -> str:
+    """0-based column index → A1 column letters (A, B, … Z, AA, AB …)."""
+    s = ""
+    n = idx0 + 1
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        s = chr(ord("A") + rem) + s
+    return s
+
+
+def _valid_sched_pair(s_str: str, e_str: str) -> bool:
+    """True only when both are real 'YYYY-MM-DD HH:MM:SS' timestamps and end>start."""
+    try:
+        s = datetime.strptime(str(s_str).strip()[:19], "%Y-%m-%d %H:%M:%S")
+        e = datetime.strptime(str(e_str).strip()[:19], "%Y-%m-%d %H:%M:%S")
+        return e > s
+    except (ValueError, TypeError):
+        return False
+
+
+def backfill_session_scheduled_times(service, window_sessions):
+    """ROOT-CAUSE FIX for blank/garbage 'Session Scheduled Start/End'.
+
+    Same-day sync often writes a Sessions row before the API has published the
+    session's real scheduled slot, so the row lands with a wrong scheduled start
+    (a placeholder) and/or a blank scheduled end. Because the pipeline is
+    append-only and dedups Sessions by session_id, that first (bad) row is never
+    revised — so Scheduled/Diff never populate in the reports.
+
+    This pass re-derives the scheduled slot for the recently re-fetched window
+    (same fields the one-time backfill used) and patches ONLY the rows whose
+    CURRENT scheduled slot is invalid (blank / null / end<=start), and only when
+    a fully valid fresh slot is available. Rows that already hold a valid slot are
+    never touched. Fully generic; never advances the watermark; fail-safe."""
+    try:
+        # 1. Fresh, valid scheduled slot per session_id from the re-fetched window.
+        fresh = {}
+        for sess in (window_sessions or []):
+            if not isinstance(sess, dict):
+                continue
+            sid = sess.get("_id") or sess.get("id") or ""
+            if not sid:
+                continue
+            s_ist = to_ist(_first_present(sess, _SCHED_START_FIELDS))
+            e_ist = to_ist(_first_present(sess, _SCHED_END_FIELDS))
+            if _valid_sched_pair(s_ist, e_ist):
+                fresh[str(sid)] = (s_ist, e_ist)
+        if not fresh:
+            print("[Backfill 5d] No valid scheduled slots in the fresh window — skipping.")
+            return
+
+        # 2. Read Sessions and locate the columns by NAME (never hard-coded).
+        rows = _read_tab_values(service, SESSIONS_TAB)
+        if len(rows) < 2:
+            print("[Backfill 5d] Sessions sheet empty — skipping.")
+            return
+        header = [h.strip() for h in rows[0]]
+        try:
+            sid_i = header.index("session_id")
+            ss_i = header.index("Session Scheduled Start")
+            se_i = header.index("Session Scheduled End")
+        except ValueError:
+            print("[Backfill 5d] Scheduled columns not found in Sessions header — skipping.")
+            return
+        ss_letter, se_letter = _col_letter(ss_i), _col_letter(se_i)
+
+        # 3. Patch only rows whose CURRENT slot is invalid AND we have a valid fresh one.
+        updates = []
+        for r_i, row in enumerate(rows[1:], start=2):     # sheet row numbers (header = row 1)
+            sid = row[sid_i].strip() if len(row) > sid_i else ""
+            if not sid or sid not in fresh:
+                continue
+            cur_s = row[ss_i].strip() if len(row) > ss_i else ""
+            cur_e = row[se_i].strip() if len(row) > se_i else ""
+            if _valid_sched_pair(cur_s, cur_e):
+                continue                                   # already good — leave it
+            new_s, new_e = fresh[sid]
+            updates.append({"range": f"{SESSIONS_TAB}!{ss_letter}{r_i}", "values": [[new_s]]})
+            updates.append({"range": f"{SESSIONS_TAB}!{se_letter}{r_i}", "values": [[new_e]]})
+
+        if not updates:
+            print("[Backfill 5d] No sessions needed a scheduled-slot fix.")
+            return
+
+        service.spreadsheets().values().batchUpdate(
+            spreadsheetId=SHEET_ID,
+            body={"valueInputOption": "RAW", "data": updates},
+        ).execute()
+        print(f"[Backfill 5d] ✓ Healed scheduled slot for {len(updates)//2} session(s).")
+    except Exception as e:
+        print(f"[Backfill 5d] ⚠ Error during scheduled-time heal: {e}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  STEP 5c — Backfill late-arriving ATTENDANCE / FEEDBACK for recent sessions
 #
@@ -1233,6 +1498,137 @@ def _read_tab_values(service, tab_name: str) -> list:
     except HttpError as e:
         print(f"[Backfill 5c] Could not read '{tab_name}': {e}")
         return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SESSIONS UPSERT  (root-cause fix for duplicate session_id rows)
+#
+#  The pipeline is append-only and dedups Sessions across runs only by a
+#  start-time high-watermark (is_new: start_time_ist > watermark). A session's
+#  start_time_ist can change between syncs — the first (same-day) sync often
+#  records the SCHEDULED start (e.g. 20:00:00) and a later sync the true ACTUAL
+#  start (e.g. 20:03:03, a LATER timestamp) — so is_new re-admits the same
+#  session_id and a DUPLICATE row is appended (one with the scheduled start, one
+#  with the actual). This upsert makes session_id the unique key: it collapses any
+#  existing duplicates, updates the row in place when a session re-syncs (keeping
+#  the finalised ACTUAL start), and appends only genuinely-new sessions. Fully
+#  generic — nothing is keyed to a technology, id or date.
+# ─────────────────────────────────────────────────────────────────────────────
+_SESS_NULLS = ("", "nan", "nat", "none", "null")
+
+
+def _sblank(v) -> bool:
+    return v is None or str(v).strip().lower() in _SESS_NULLS
+
+
+def _merge_session_rows(a: dict, b: dict) -> dict:
+    """Merge two records for the SAME session_id (each a dict over
+    SESSIONS_COLUMNS) into the single best record. A later synced_at is treated as
+    more finalised, so it wins for start_time_ist (first sync = scheduled, later =
+    actual). Non-blank values are coalesced; the scheduled slot prefers a valid
+    (end > start) pair; synced_at keeps the latest."""
+    sa = "" if _sblank(a.get("synced_at")) else str(a.get("synced_at")).strip()
+    sb = "" if _sblank(b.get("synced_at")) else str(b.get("synced_at")).strip()
+    newer, older = (a, b) if sa >= sb else (b, a)
+
+    def pick(col):                       # newer non-blank, else older non-blank, else ""
+        v = newer.get(col)
+        if not _sblank(v):
+            return v
+        v2 = older.get(col)
+        return v2 if not _sblank(v2) else ""
+
+    out = {c: pick(c) for c in SESSIONS_COLUMNS}
+    # scheduled slot: prefer a valid (end>start) pair from newer, else older
+    for rec in (newer, older):
+        ss, se = rec.get("Session Scheduled Start"), rec.get("Session Scheduled End")
+        if _valid_sched_pair(ss, se):
+            out["Session Scheduled Start"], out["Session Scheduled End"] = ss, se
+            break
+    return out
+
+
+def upsert_sessions(service, fresh_rows: list):
+    """Write Sessions as an UPSERT keyed by session_id (see header above): collapse
+    existing duplicate session_id rows, update rows whose data changed on re-sync,
+    and append new sessions. Falls back to a plain append on any read error so a
+    transient failure never loses data."""
+    from collections import OrderedDict
+    fresh_rows = fresh_rows or []
+    try:
+        vals = _read_tab_values(service, SESSIONS_TAB)
+    except Exception as e:
+        print(f"[Sessions] Upsert read failed ({e}); appending instead.")
+        if fresh_rows:
+            append_rows_with_retry(service, SESSIONS_TAB, fresh_rows, SESSIONS_COLUMNS)
+        return
+
+    # Empty tab → write header + fresh rows.
+    if not vals:
+        if fresh_rows:
+            body = [SESSIONS_COLUMNS] + [[r.get(c, "") for c in SESSIONS_COLUMNS] for r in fresh_rows]
+            service.spreadsheets().values().update(
+                spreadsheetId=SHEET_ID, range=f"{SESSIONS_TAB}!A1",
+                valueInputOption="RAW", body={"values": body}).execute()
+            print(f"[Sessions] Upsert: empty tab → wrote {len(fresh_rows)} row(s).")
+        return
+
+    hdr = [str(h).strip() for h in vals[0]]
+    pos = {h: i for i, h in enumerate(hdr)}
+    if "session_id" not in pos:
+        print("[Sessions] Upsert: no session_id column — appending instead.")
+        if fresh_rows:
+            append_rows_with_retry(service, SESSIONS_TAB, fresh_rows, SESSIONS_COLUMNS)
+        return
+    sidx = pos["session_id"]
+
+    def rowdict(row):
+        return {c: (row[pos[c]] if c in pos and pos[c] < len(row) else "") for c in SESSIONS_COLUMNS}
+
+    old_data = vals[1:]
+    merged = OrderedDict()
+    n_dup = 0
+    for row in old_data:
+        sid = str(row[sidx]).strip() if sidx < len(row) else ""
+        if not sid:
+            continue
+        rd = rowdict(row)
+        if sid in merged:
+            merged[sid] = _merge_session_rows(merged[sid], rd)
+            n_dup += 1
+        else:
+            merged[sid] = rd
+
+    n_new = n_upd = 0
+    for r in fresh_rows:
+        sid = str(r.get("session_id", "")).strip()
+        if not sid:
+            continue
+        rr = {c: r.get(c, "") for c in SESSIONS_COLUMNS}
+        if sid in merged:
+            merged[sid] = _merge_session_rows(merged[sid], rr)
+            n_upd += 1
+        else:
+            merged[sid] = rr
+            n_new += 1
+
+    # Nothing to do (no duplicates and no fresh rows) → leave the sheet untouched.
+    if n_dup == 0 and not fresh_rows:
+        return
+
+    out_rows = [[merged[sid].get(c, "") for c in SESSIONS_COLUMNS] for sid in merged]
+    body = [SESSIONS_COLUMNS] + out_rows
+    service.spreadsheets().values().update(
+        spreadsheetId=SHEET_ID, range=f"{SESSIONS_TAB}!A1",
+        valueInputOption="RAW", body={"values": body}).execute()
+    # If dedupe shrank the sheet, clear the now-orphaned trailing rows.
+    old_count, new_count = len(old_data), len(out_rows)
+    if new_count < old_count:
+        service.spreadsheets().values().clear(
+            spreadsheetId=SHEET_ID,
+            range=f"{SESSIONS_TAB}!A{new_count + 2}:ZZ{old_count + 1}").execute()
+    print(f"[Sessions] Upsert: {n_dup} duplicate(s) collapsed, {n_upd} updated, "
+          f"{n_new} appended → {new_count} unique session(s).")
 
 
 def _seed_seen_from_sheet(service) -> dict:
@@ -1285,6 +1681,10 @@ def backfill_recent_attendance(service, synced_at: str, use_cache: bool = False)
         if not window_sessions:
             print("[Backfill 5c] No sessions in window — nothing to backfill.")
             return
+
+        # Heal blank/garbage scheduled start/end for existing rows in this window
+        # (same fresh fetch), so Scheduled/Diff populate in the reports.
+        backfill_session_scheduled_times(service, window_sessions)
 
         # 2. Seed dedup keys from what is already in the sheet.
         seen = _seed_seen_from_sheet(service)
@@ -1450,6 +1850,11 @@ def main():
 
     # ── Step 5b: Backfill blank end_time_ist from Attendance ──────────────────
     backfill_session_end_times(service)
+
+    # ── Step 5b2: Align Sessions ACTUAL start/end with Attendance (one source of
+    #    truth). Fixes rows where the first same-day sync kept the scheduled start
+    #    and the finalised actual (earlier) could not re-admit past the watermark.
+    sync_session_actual_times(service)
 
     # ── Step 5c: Backfill late-arriving attendance/feedback for recent sessions ─
     # Recovers rows for sessions synced before their attendance finalised (the
