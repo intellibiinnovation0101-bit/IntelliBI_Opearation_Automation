@@ -1477,15 +1477,21 @@ def _wise_render_section(ws, start_row, ncols_max, banner_text, data_headers,
     return r + 1
 
 
-def build_wise_validation(ws, data, report_date, period_label=None):
-    """Learner Wise Validation tab — combines pyWiseDataValidationReport's Student,
-    Course and Instructor validation FAILURES into one coordinator tab. Each section
-    is separated by a header banner and ends in an action-oriented, red-highlighted
-    'Why Flagged' column. Only failed / attention-required records are shown; the
-    validation logic itself is reused unchanged."""
+def build_wise_validation(ws, data, report_date, period_label=None, interview_rows=None):
+    """Wise & Interview Feedback Validation tab — combines pyWiseDataValidationReport's
+    Student, Course and Instructor validation FAILURES, PLUS an 'Interview Feedback Not
+    Completed' section, into one coordinator tab. Each section is separated by a header
+    banner and ends in an action-oriented, red-highlighted 'Why Flagged' column. The
+    existing Wise validation logic is reused unchanged; the interview-feedback section
+    is purely additive."""
     from openpyxl.utils import get_column_letter
     NMAX = 11
-    title = (f"IntelliBI  |  Batch Coordinator — Learner Wise Validation  |  "
+    # Interview Feedback Not Completed — appended as the LAST section of this tab.
+    IFV_DATA = ["Interview Start Date", "Interviewer Name", "Tech Stack",
+                "Batch Name", "Batch Title / Duration"]
+    IFV_BANNER = ("  INTERVIEW FEEDBACK NOT COMPLETED  —  Feedback Missing in the "
+                  "Interview Consolidate Sheet")
+    title = (f"IntelliBI  |  Batch Coordinator — Wise & Interview Feedback Validation  |  "
              f"{period_label or report_date.strftime('%d-%b-%Y')}")
     AR.style_title_row(ws, 1, 1, NMAX, title)
     ws.cell(row=1, column=1).alignment = AR._align("center", "center")
@@ -1495,8 +1501,12 @@ def build_wise_validation(ws, data, report_date, period_label=None):
         AR.write_section_banner(ws, row, NMAX,
                                 "  Wise validation data is unavailable for this run.",
                                 AR.C_GREY_BD, h_align="center")
+        # Still show the Interview Feedback validation section (independent of Wise data).
+        _wise_render_section(ws, row + 2, NMAX, IFV_BANNER, IFV_DATA,
+                             interview_rows or [], {1, 2, 3, 4})
         ws.freeze_panes = "A2"
         AR.auto_col_width(ws)
+        ws.column_dimensions[get_column_letter(NMAX)].width = 72
         return ws
 
     STU_DATA = ["#", "Student Name", "Batch Name", "Name", "Email", "Phone",
@@ -1514,6 +1524,9 @@ def build_wise_validation(ws, data, report_date, period_label=None):
     row = _wise_render_section(
         ws, row, NMAX, "  INSTRUCTOR VALIDATION  —  Failed / Attention-Required Records",
         INS_DATA, _wise_instructor_display(data.get("instructor", [])), {2})
+    # NEW — Interview Feedback Not Completed (last section, additive).
+    row = _wise_render_section(
+        ws, row, NMAX, IFV_BANNER, IFV_DATA, interview_rows or [], {1, 2, 3, 4})
 
     ws.freeze_panes = "A2"
     AR.auto_col_width(ws)
@@ -2238,6 +2251,8 @@ import re as _iv_re
 INTERVIEW_FOLDER_ID    = "1PzfXzmpLk_O9vBur6g7azkcxKWMikeKP"   # coordinator interview-schedule folder
 INTERVIEW_HELPER_TAB   = "Interview_Helper"
 INTERVIEW_FEEDBACK_TAB = "Interview Feedback"
+# Interview Consolidate Sheet — where completed interview feedback is published.
+INTERVIEW_CONSOLIDATE_SHEET_ID = "16IQtgrlvYZpEpsmtzWhyaS9ZgRHYB_jzQBF--DckCPg"
 
 IV_COLS = ["Interview Time", "Batch Name (Class)", "Batch Title / Duration",
            "Candidate Name", "Phone", "Why Flagged"]
@@ -2555,6 +2570,172 @@ def _iv_interviewer_runs(action, name, time_label, date_label, note=None):
     return runs
 
 
+def _iv_norm_date(value):
+    """Parse a 'dd-MMM-yyyy' (or full-month) date to a date object; None if it is
+    not a date. Used for filename dates and the Consolidate 'Interview Date'."""
+    s = str(value or "").strip()
+    if not s:
+        return None
+    for fmt in ("%d-%b-%Y", "%d-%B-%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _iv_filename_dates(name):
+    """(start_date, end_date) from the interview file name's trailing date token(s).
+    Newer files carry BOTH dates ('..._22-Sep-2026_23-Sep-2026'); older files carry
+    one ('..._21-Sep-2026') -> start == end. Returns None when no trailing date."""
+    toks = str(name or "").strip().split("_")
+    dts = []
+    for tok in reversed(toks):
+        d = _iv_norm_date(tok)
+        if d is None:
+            break                       # stop at the first non-date token from the end
+        dts.append(d)
+    if not dts:
+        return None
+    return min(dts), max(dts)
+
+
+def _iv_meta_value(grid, key):
+    """Value of a 'KEY:value' metadata cell (e.g. 'TECH_STACKS:Python') from the
+    Interview Feedback tab's machine-readable header row. '' if not present."""
+    key_l = str(key).strip().lower()
+    for row in grid[:6]:
+        for cell in row:
+            s = str(cell or "")
+            if ":" in s and s.split(":", 1)[0].strip().lower() == key_l:
+                return s.split(":", 1)[1].strip()
+    return ""
+
+
+def _iv_read_range(sheets, fid, a1):
+    """Raw grid for an explicit A1 range (first sheet when no tab prefix). [] on error."""
+    try:
+        resp = sheets.spreadsheets().values().get(spreadsheetId=fid, range=a1).execute()
+        return resp.get("values", [])
+    except Exception as e:                                  # pragma: no cover
+        log.warning("Sheet range %s unreadable (%s).", a1, e)
+        return []
+
+
+def _iv_consolidate_index(sheets):
+    """Set of (norm Batch Name, norm Batch Title, Interview Date) present in the
+    Interview Consolidate Sheet. Returns None when the sheet/header can't be read,
+    so callers can skip flagging rather than raise false 'not completed' alerts."""
+    grid = _iv_read_range(sheets, INTERVIEW_CONSOLIDATE_SHEET_ID, "A1:U50000")
+    if not grid:
+        return None
+    hdr_i = bn_c = bt_c = dt_c = None
+    for i, row in enumerate(grid[:8]):
+        low = [str(c or "").strip().lower() for c in row]
+        if "batch name" in low and "batch title" in low and "interview date" in low:
+            hdr_i = i
+            bn_c = low.index("batch name")
+            bt_c = low.index("batch title")
+            dt_c = low.index("interview date")
+            break
+    if hdr_i is None:
+        return None                     # header not found -> cannot validate
+    idx = set()
+    for row in grid[hdr_i + 1:]:
+        bn = _norm_name(row[bn_c]) if bn_c < len(row) else ""
+        bt = _norm_name(row[bt_c]) if bt_c < len(row) else ""
+        d  = _iv_norm_date(row[dt_c]) if dt_c < len(row) else None
+        if bn and bt and d:
+            idx.add((bn, bt, d))
+    return idx
+
+
+def _iv_feedback_missing_runs(end_date_label, interviewer, batch_name):
+    """Dynamic, action-oriented Why-Flagged runs for a missing interview feedback.
+    Highlights the end date, the 'feedback not available' point and the interviewer
+    name; when the interviewer name is unknown the wording omits it gracefully."""
+    who = str(interviewer or "").strip()
+    lead = [("Interview ended on ", False), (end_date_label, True),
+            (", but feedback is not available in the Interview Consolidate Sheet", True),
+            (" — ", False)]
+    if who:
+        tail = [("Check with ", False), (who, True),
+                (" whether the interview feedback has been completed and submitted.",
+                 False)]
+    else:
+        tail = [("Please check whether the interview feedback for ", False),
+                (str(batch_name or "this batch"), True),
+                (" has been completed and submitted.", False)]
+    return [lead + tail]
+
+
+def load_interview_feedback_validation(sheets, drive, report_date):
+    """Interviews whose END date was yesterday (report_date == End Date + 1) and
+    whose feedback is NOT yet present in the Interview Consolidate Sheet. Returns
+    display rows for _wise_render_section: cells = [Interview Start Date, Interviewer
+    Name, Tech Stack, Batch Name, Batch Title / Duration]. Nothing hard-coded."""
+    try:
+        q = (f"'{INTERVIEW_FOLDER_ID}' in parents and "
+             f"mimeType='application/vnd.google-apps.spreadsheet' and trashed=false")
+        files = drive.files().list(
+            q=q, fields="files(id,name)", pageSize=1000, supportsAllDrives=True,
+            includeItemsFromAllDrives=True).execute().get("files", [])
+    except Exception as e:
+        log.warning("Interview folder unreadable for feedback validation (%s).", e)
+        return []
+
+    # Only files whose interview END date was yesterday need checking today.
+    todo = []
+    for fmeta in files:
+        span = _iv_filename_dates(fmeta.get("name", ""))
+        if not span:
+            continue
+        start_d, end_d = span
+        if report_date == end_d + timedelta(days=1):
+            todo.append((fmeta.get("id", ""), start_d, end_d))
+    if not todo:
+        return []
+
+    consolidated = _iv_consolidate_index(sheets)
+    if consolidated is None:            # can't read the Consolidate Sheet -> don't flag
+        log.warning("Interview Consolidate Sheet not readable — feedback validation skipped.")
+        return []
+
+    rows, seen = [], set()
+    for fid, start_d, end_d in todo:
+        helper = _iv_read_grid(sheets, fid, INTERVIEW_HELPER_TAB)
+        batch_name  = _iv_label_value(helper, "Batch Name (Class)")
+        batch_title = _iv_label_value(helper, "Batch Title / Duration")
+        interviewer = _iv_label_value(helper, "Interviewer Name")
+        # Tech Stack — from the Interview Feedback metadata; fall back to Batch Name.
+        tech = _iv_meta_value(_iv_read_grid(sheets, fid, INTERVIEW_FEEDBACK_TAB),
+                              "TECH_STACKS") or batch_name
+
+        dk = (_norm_name(batch_name), _norm_name(batch_title), start_d, end_d)
+        if dk in seen:
+            continue
+        seen.add(dk)
+
+        # Feedback present if ANY interview day in [start..end] is in the Consolidate.
+        found, d = False, start_d
+        while d <= end_d:
+            if (_norm_name(batch_name), _norm_name(batch_title), d) in consolidated:
+                found = True
+                break
+            d += timedelta(days=1)
+        if found:
+            continue
+
+        rows.append({
+            "cells": [start_d.strftime("%d-%b-%Y"), interviewer, tech,
+                      batch_name, batch_title],
+            "status_cells": {}, "severity": 2,
+            "why_reasons": _iv_feedback_missing_runs(
+                end_d.strftime("%d-%b-%Y"), interviewer, batch_name),
+        })
+    return rows
+
+
 def load_interview_reminders(sheets, drive, report_date):
     """Interview follow-up GROUPS due on report_date. Each group is one
     (batch, interview_date, action) with its due candidates. A candidate is due
@@ -2793,10 +2974,19 @@ def _generate_daily(service, report_date, sess_agg, att_agg, fb_agg, tf_agg, sus
     # reusing pyAdmissionFormalitiesReport's own matching/status logic wholesale.
     build_admission_formalities(wb.create_sheet("Learner Admission Formalities"),
                                 load_admission_formalities(service), report_date)
-    # Learner Wise Validation — Student / Course / Instructor data-validation
-    # failures, reusing pyWiseDataValidationReport's own validation logic wholesale.
-    build_wise_validation(wb.create_sheet("Learner Wise Validation"),
-                          load_wise_validation(), report_date)
+    # Wise & Interview Feedback Validation — Student / Course / Instructor data-
+    # validation failures (reused wholesale) PLUS an additive 'Interview Feedback
+    # Not Completed' section (interviews that ended yesterday with no feedback yet
+    # in the Interview Consolidate Sheet). The interview part is wrapped so it can
+    # never block the rest of the report.
+    _ifv_rows = []
+    try:
+        _ifv_sheets, _ifv_drive = _iv_services()
+        _ifv_rows = load_interview_feedback_validation(_ifv_sheets, _ifv_drive, report_date)
+    except Exception as _ifve:
+        log.exception("Interview Feedback validation skipped (%s).", _ifve)
+    build_wise_validation(wb.create_sheet("Wise & Interview Feedback Validation"),
+                          load_wise_validation(), report_date, interview_rows=_ifv_rows)
     build_instructor_followups(wb.create_sheet("Instructor Follow-Ups"),
                                sess_daily, att_daily, fb_daily, tf_daily,
                                instr_phones, report_date)
