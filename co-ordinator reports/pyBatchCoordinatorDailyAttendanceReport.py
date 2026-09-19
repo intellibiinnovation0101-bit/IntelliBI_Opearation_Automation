@@ -1809,10 +1809,16 @@ def _find_or_create_folder(drive, parent_id, name):
 
 def upload_report(folder_name: str, filename: str, buf: io.BytesIO, base_prefix: str) -> str:
     """Create <parent>/<folder_name>/ and drop the workbook there as a native
-    Google Sheet (converted on upload). Any earlier run whose name contains
-    base_prefix in that folder is replaced, so the folder keeps ONE current sheet
-    for this report (other reports in the folder are untouched). History is kept
-    because each period/day has its own sub-folder."""
+    Google Sheet (converted on upload). Existing reports for this report/date are
+    NEVER overwritten or modified — the Coordinator may have added manual follow-up
+    comments to them. If a report with this base_prefix already exists in the
+    folder, the new run is saved as the next version instead:
+        first run      -> the plain file name
+        already exists -> "<name> - Version 2"
+        Version 2 too  -> "<name> - Version 3"  (increments dynamically)
+    Every previous version is kept unchanged. base_prefix scopes this per report
+    type, so each type versions independently and other reports are untouched."""
+    import re
     from google.oauth2 import service_account
     from googleapiclient.discovery import build as gbuild
     from googleapiclient.http import MediaIoBaseUpload
@@ -1827,20 +1833,32 @@ def upload_report(folder_name: str, filename: str, buf: io.BytesIO, base_prefix:
     base = base_prefix.replace("'", "\\'")
     q = f"'{folder_id}' in parents and name contains '{base}' and trashed=false"
     existing = drive.files().list(q=q, fields="files(id,name)", supportsAllDrives=True,
-                                  includeItemsFromAllDrives=True).execute()
-    for f in existing.get("files", []):
-        drive.files().delete(fileId=f["id"], supportsAllDrives=True).execute()
+                                  includeItemsFromAllDrives=True).execute().get("files", [])
+
+    # Do NOT delete/replace any existing report — preserve every version. If one
+    # already exists for this report type in this folder, name the new run as the
+    # next available version (the un-versioned file counts as Version 1).
+    if existing:
+        _ver_re = re.compile(r"-\s*Version\s*(\d+)\s*$", re.IGNORECASE)
+        max_ver = 1
+        for _f in existing:
+            _m = _ver_re.search(_f.get("name", ""))
+            if _m:
+                max_ver = max(max_ver, int(_m.group(1)))
+        target_name = f"{drive_name} - Version {max_ver + 1}"
+    else:
+        target_name = drive_name
 
     buf.seek(0)
     media = MediaIoBaseUpload(
         buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         resumable=False)
-    meta = {"name": drive_name, "parents": [folder_id],
+    meta = {"name": target_name, "parents": [folder_id],
             "mimeType": "application/vnd.google-apps.spreadsheet"}
     up = drive.files().create(body=meta, media_body=media, fields="id,webViewLink",
                               supportsAllDrives=True).execute()
     link = up.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{up.get('id','')}/edit"
-    log.info("Uploaded native Google Sheet → %s / %s", folder_name, drive_name)
+    log.info("Uploaded native Google Sheet → %s / %s", folder_name, target_name)
     return link
 
 
@@ -2201,6 +2219,526 @@ def _le_date(df, d):
     return df[df["_date"].apply(lambda x: x is not None and not pd.isna(x) and x <= d)].copy()
 
 
+# =============================================================================
+#  LEARNER & INSTRUCTOR INTERVIEW REMINDER  (ADDITIVE TAB — upcoming interviews)
+#  -----------------------------------------------------------------------------
+#  Reads the interview-schedule Google Sheets in the coordinator interview folder,
+#  finds interviews whose follow-up date falls on the report date, and lists the
+#  Instructor reminder (first, on a distinct row) followed by the learner
+#  reminders (sorted by interview time). Follow-up rule, per interview date D:
+#     Call    = last non-Sunday day strictly before D          (1 day prior)
+#     Message = last non-Sunday day strictly before the Call    (2 days prior)
+#  Sundays are never used and the pair shifts backward automatically. Every value
+#  (dates, batches, instructors, candidates, phones, times) is data-driven — none
+#  is hard-coded. This block is fully self-contained and only ADDS a tab; it never
+#  changes any existing tab, calculation, formatting, Drive/email or report logic.
+# =============================================================================
+import re as _iv_re
+
+INTERVIEW_FOLDER_ID    = "1PzfXzmpLk_O9vBur6g7azkcxKWMikeKP"   # coordinator interview-schedule folder
+INTERVIEW_HELPER_TAB   = "Interview_Helper"
+INTERVIEW_FEEDBACK_TAB = "Interview Feedback"
+
+IV_COLS = ["Interview Time", "Batch Name (Class)", "Batch Title / Duration",
+           "Candidate Name", "Phone", "Why Flagged"]
+IVN  = len(IV_COLS)
+_IVC = {h: i + 1 for i, h in enumerate(IV_COLS)}
+
+
+def _iv_services():
+    """Impersonated Sheets + Drive clients (same identity that owns the interview
+    folder) so every schedule file in it is readable regardless of service-account
+    sharing. Uses ONLY the Drive scope — exactly the scope upload_report already
+    impersonates with successfully — because the service account's domain-wide
+    delegation is authorised for that scope. (Requesting an extra, un-delegated
+    scope such as spreadsheets makes the whole impersonated token fail, which
+    silently emptied the reminder tab.) The Sheets API accepts the Drive scope for
+    reads, so both clients are built from the same Drive-scoped credentials."""
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build as gbuild
+    creds = service_account.Credentials.from_service_account_file(
+        AR.SERVICE_ACCOUNT_FILE,
+        scopes=["https://www.googleapis.com/auth/drive"],
+    ).with_subject(IMPERSONATE_USER)
+    sheets = gbuild("sheets", "v4", credentials=creds, cache_discovery=False)
+    drive  = gbuild("drive", "v3", credentials=creds, cache_discovery=False)
+    return sheets, drive
+
+
+def _iv_prev_non_sunday(d):
+    """Latest day strictly before d that is not a Sunday (weekday 6)."""
+    d = d - timedelta(days=1)
+    while d.weekday() == 6:
+        d = d - timedelta(days=1)
+    return d
+
+
+def _iv_reminder_days(interview_date):
+    """(message_day, call_day) for an interview date. Call is the last non-Sunday
+    before the interview; Message the last non-Sunday before the Call. Guarantees
+    two distinct non-Sunday days, Call closest to the interview."""
+    call_day = _iv_prev_non_sunday(interview_date)
+    msg_day  = _iv_prev_non_sunday(call_day)
+    return msg_day, call_day
+
+
+def _iv_filename_date(name):
+    """Interview start date from the file name's last '_'-token (e.g. '21-Sep-2026')."""
+    tok = str(name or "").strip().split("_")[-1]
+    for fmt in ("%d-%b-%Y", "%d-%B-%Y"):
+        try:
+            return datetime.strptime(tok, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _iv_parse_slot(cell):
+    """Parse an 'Interview Time' cell like '21 Sep 2026  08:00 PM - 08:10 PM'.
+    Returns (interview_date, start_datetime, start_label, display_text) or None."""
+    s = _iv_re.sub(r"\s+", " ", str(cell or "")).strip()
+    if not s:
+        return None
+    parts = _iv_re.split(r"\s*[–—\-]\s*", s)      # en/em/hyphen dash
+    head = parts[0].strip()                                 # "21 Sep 2026 08:00 PM"
+    end  = parts[1].strip() if len(parts) > 1 else ""
+    dt = None
+    for fmt in ("%d %b %Y %I:%M %p", "%d %B %Y %I:%M %p"):
+        try:
+            dt = datetime.strptime(head, fmt); break
+        except ValueError:
+            continue
+    if dt is None:
+        return None
+    start_label = dt.strftime("%I:%M %p").lstrip("0")
+    disp = f"{dt.strftime('%d-%b-%Y')}  {start_label}" + (f" - {end}" if end else "")
+    return dt.date(), dt, start_label, disp
+
+
+def _iv_read_grid(sheets, fid, tab):
+    """Raw cell grid (list of rows) for one tab; [] on any error."""
+    try:
+        resp = sheets.spreadsheets().values().get(
+            spreadsheetId=fid, range=f"'{tab}'!A1:Z200").execute()
+        return resp.get("values", [])
+    except Exception as e:                                  # pragma: no cover
+        log.warning("Interview file %s tab '%s' unreadable (%s).", fid, tab, e)
+        return []
+
+
+def _iv_label_value(grid, label):
+    """First non-blank value to the RIGHT of the cell whose text equals/starts with
+    `label` (case-insensitive, trailing ':' ignored). '' if not found."""
+    lab = label.strip().lower().rstrip(":")
+    for row in grid:
+        for j, cell in enumerate(row):
+            t = str(cell or "").strip().lower().rstrip(":")
+            if t == lab or (lab and t.startswith(lab)):
+                for k in range(j + 1, len(row)):
+                    v = str(row[k] or "").strip()
+                    if v:
+                        return v
+    return ""
+
+
+def _iv_feedback_rows(grid):
+    """Yield (time_cell, candidate_name) from the Interview Feedback grid, locating
+    the header row (the one carrying both an 'Interview Time' and a 'Candidate'
+    column) dynamically so exact row positions are never assumed."""
+    hdr_idx = time_col = name_col = None
+    for i, row in enumerate(grid[:8]):
+        low = [str(c or "").strip().lower().replace("\n", " ") for c in row]
+        has_time = any(("interview" in c and "time" in c) for c in low)
+        has_cand = any("candidate" in c for c in low)
+        if has_time and has_cand:
+            hdr_idx = i
+            for j, c in enumerate(low):
+                if time_col is None and ("interview" in c and "time" in c):
+                    time_col = j
+                if name_col is None and "candidate" in c:
+                    name_col = j
+            break
+    if hdr_idx is None or time_col is None or name_col is None:
+        return
+    for row in grid[hdr_idx + 1:]:
+        tcell = row[time_col] if time_col < len(row) else ""
+        ncell = row[name_col] if name_col < len(row) else ""
+        name = str(ncell or "").strip()
+        if name:
+            yield str(tcell or "").strip(), name
+
+
+def _iv_instructor_index(sess_agg):
+    """From the report's own session data: (norm course_name, norm course_title) ->
+    instructor name, and (norm course_name) -> instructor name. Latest session wins."""
+    by_full, by_name = {}, {}
+    if sess_agg is None or getattr(sess_agg, "empty", True):
+        return by_full, by_name
+    df = AR._prefer_instructor_name(sess_agg)
+    if "course_name" not in df.columns or "tutor_name" not in df.columns:
+        return by_full, by_name
+    d = df.copy()
+    if "start_time_ist" in d.columns:
+        d["_iv_k"] = d["start_time_ist"].apply(_parse_dt)
+        d = d.sort_values("_iv_k", na_position="first")
+    for _, r in d.iterrows():
+        nm = str(r.get("tutor_name", "") or "").strip()
+        if not nm:
+            continue
+        cn = _norm_name(r.get("course_name", ""))
+        ct = _norm_name(r.get("course_title", ""))
+        if cn:
+            by_name[cn] = nm
+            if ct:
+                by_full[(cn, ct)] = nm
+    return by_full, by_name
+
+
+def _iv_phone_index(att_agg):
+    """From the report's own attendance data: (norm student_name, norm course_name)
+    -> phone, and (norm student_name) -> phone (first non-blank wins)."""
+    by_full, by_name = {}, {}
+    if att_agg is None or getattr(att_agg, "empty", True):
+        return by_full, by_name
+    if "student_name" not in att_agg.columns:
+        return by_full, by_name
+    for _, r in att_agg.iterrows():
+        nm = _norm_name(r.get("student_name", ""))
+        ph = str(r.get("phone", "") or "").strip()
+        if not nm or not ph:
+            continue
+        cn = _norm_name(r.get("course_name", ""))
+        by_name.setdefault(nm, ph)
+        if cn:
+            by_full.setdefault((nm, cn), ph)
+    return by_full, by_name
+
+
+def _iv_resolve_instructor(inst_full, inst_name, batch_name, batch_title):
+    cn, ct = _norm_name(batch_name), _norm_name(batch_title)
+    if cn and ct and (cn, ct) in inst_full:
+        return inst_full[(cn, ct)]
+    return inst_name.get(cn, "")
+
+
+def _iv_resolve_phone(ph_full, ph_name, candidate, batch_name):
+    nm, cn = _norm_name(candidate), _norm_name(batch_name)
+    if cn and (nm, cn) in ph_full:
+        return ph_full[(nm, cn)]
+    return ph_name.get(nm, "")
+
+
+def _iv_learner_runs(action, name, time_label, date_label):
+    """Person-specific, action-oriented Why-Flagged runs for a learner. The learner
+    name, date, time and the Call/Message action are highlighted; wording is built
+    dynamically from those values (nothing hard-coded per person)."""
+    who = str(name or "").strip() or "the learner"
+    if action == "message":                                    # 2 days prior
+        return [[("Interview on ", False), (date_label, True), (" at ", False),
+                 (time_label, True), (" — ", False),
+                 ("Message ", True), (who, True),
+                 (" one-to-one, share the interview details, and ask them to "
+                  "prepare and join on time.", False)]]
+    return [[("Interview tomorrow at ", False), (time_label, True),      # 1 day prior
+             (" — ", False), ("Call ", True), (who, True),
+             (", confirm attendance, remind them to prepare well, follow interview "
+              "etiquette, and join on time.", False)]]
+
+
+def _iv_instructor_runs(action, time_label, date_label):
+    """Action-oriented Why-Flagged runs for the instructor (key info highlighted)."""
+    if action == "message":
+        return [[("Interview scheduled at ", False), (time_label, True),
+                 (" on ", False), (date_label, True), (" — ", False),
+                 ("Message Instructor", True),
+                 (", confirm availability, ensure the interviewer guidelines & Q&A "
+                  "are reviewed, and be ready to start on time.", False)]]
+    return [[("Interview tomorrow at ", False), (time_label, True),
+             (" on ", False), (date_label, True), (" — ", False),
+             ("Call Instructor", True),
+             (", confirm availability, ensure guidelines/Q&A are reviewed, follow "
+              "interview etiquette, and start on time.", False)]]
+
+
+def _iv_name_full_key(name):
+    """Cleansed, case-insensitive full-name key (collapse whitespace, casefold)."""
+    return " ".join(str(name or "").split()).casefold()
+
+
+def _iv_name_comp_keys(name):
+    """'First name + Last-name initial' compressed key(s), lowercase, no spaces —
+    e.g. 'Kumar Aradhya' -> {'kumara'}. A single-token name -> just that token. A
+    3+-token name returns both first+last-initial and first+second-initial so either
+    naming convention matches. Generic for any interviewer name (nothing hard-coded)."""
+    toks = [t for t in str(name or "").split() if t]
+    if not toks:
+        return set()
+    first = toks[0].casefold()
+    if len(toks) == 1:
+        return {first}
+    return {(first + toks[-1][0]).casefold(), (first + toks[1][0]).casefold()}
+
+
+def load_interviewer_phone_index(service):
+    """Build interviewer phone lookups from IntelliBIStudentInfo → Instructor tab.
+    Returns {'active': {...}, 'inactive': {...}}, each a {'full': {key->phone},
+    'comp': {key->phone}} keyed by the cleansed full name AND the compressed
+    First+Last-Initial form, so an interviewer name can be matched either way.
+    Active and Inactive rows are kept separate to honour the search priority."""
+    empty = lambda: {"full": {}, "comp": {}}
+    idx = {"active": empty(), "inactive": empty()}
+    try:
+        df = AR.read_sheet_df(service, INSTRUCTOR_TAB_SHEET_ID, INSTRUCTOR_TAB)
+    except Exception as e:
+        log.warning("Could not read Instructor tab for interviewer match (%s).", e)
+        return idx
+    if df is None or df.empty:
+        return idx
+    has_active = "Is_Active" in df.columns
+    for _, r in df.iterrows():
+        is_active = (str(r.get("Is_Active", "")).strip().upper() == "Y") if has_active else True
+        bucket = idx["active"] if is_active else idx["inactive"]
+        for i in range(1, INSTRUCTOR_NAME_SLOTS + 1):
+            raw = str(r.get(f"instructor_name_{i}", "") or "").strip()
+            ph  = str(r.get(f"alternative_contact_number_{i}", "") or "").strip()
+            if not raw or not ph:
+                continue
+            fk = _iv_name_full_key(raw)
+            if fk:
+                bucket["full"].setdefault(fk, ph)
+            for ck in _iv_name_comp_keys(raw):
+                bucket["comp"].setdefault(ck, ph)
+    return idx
+
+
+def _iv_match_interviewer_phone(idx, interviewer_name):
+    """Phone for an interviewer name, in priority order: Active exact full-name,
+    Active First+Last-Initial, then the same for Inactive. Cleansed & case-
+    insensitive. '' when no match (caller keeps the phone blank)."""
+    if not str(interviewer_name or "").strip():
+        return ""
+    fk = _iv_name_full_key(interviewer_name)
+    cks = _iv_name_comp_keys(interviewer_name)
+    for state in ("active", "inactive"):
+        bucket = idx.get(state, {"full": {}, "comp": {}})
+        if fk and fk in bucket["full"]:            # exact full-name match first
+            return bucket["full"][fk]
+        for ck in cks:                             # then First + Last-Initial
+            if ck in bucket["comp"]:
+                return bucket["comp"][ck]
+            if ck in bucket["full"]:               # tab stored the compressed form
+                return bucket["full"][ck]
+    return ""
+
+
+def _iv_interviewer_runs(action, name, time_label, date_label, note=None):
+    """Person-specific, action-oriented Why-Flagged runs for the INTERVIEWER. The
+    interviewer name, date, time and the Call/Message action are highlighted; the
+    wording is built dynamically from those values. When the interviewer name is
+    unknown (older files) it reads 'the interviewer'. An optional `note` (phone/name
+    not available) is appended as a second highlighted bullet."""
+    who = str(name or "").strip() or "the interviewer"
+    if action == "message":                                    # 2 days prior
+        lead = [("Interview on ", False), (date_label, True), (" at ", False),
+                (time_label, True), (" — ", False),
+                ("Message ", True), (who, True),
+                (" to confirm interview readiness and availability, and to review "
+                 "the interviewer guidelines & Q&A before the interview.", False)]
+    else:                                                      # 1 day prior
+        lead = [("Interview tomorrow at ", False), (time_label, True),
+                (" on ", False), (date_label, True), (" — ", False),
+                ("Call ", True), (who, True),
+                (" and confirm interview readiness and availability.", False)]
+    runs = [lead]
+    if note:
+        runs.append([(note, True)])
+    return runs
+
+
+def load_interview_reminders(sheets, drive, report_date):
+    """Interview follow-up GROUPS due on report_date. Each group is one
+    (batch, interview_date, action) with its due candidates. A candidate is due
+    when report_date equals its Message day or Call day (per-candidate interview
+    date; Sundays skipped/shifted)."""
+    try:
+        q = (f"'{INTERVIEW_FOLDER_ID}' in parents and "
+             f"mimeType='application/vnd.google-apps.spreadsheet' and trashed=false")
+        files = drive.files().list(
+            q=q, fields="files(id,name,modifiedTime)", pageSize=1000,
+            orderBy="modifiedTime desc", supportsAllDrives=True,
+            includeItemsFromAllDrives=True).execute().get("files", [])
+    except Exception as e:
+        log.warning("Interview folder unreadable (%s) — reminder tab will be empty.", e)
+        return []
+
+    groups, seen = {}, set()
+    lo, hi = report_date - timedelta(days=5), report_date + timedelta(days=60)
+    for fmeta in files:
+        fid, fname = fmeta.get("id", ""), fmeta.get("name", "")
+        fd = _iv_filename_date(fname)
+        if fd is not None and not (lo <= fd <= hi):
+            continue                                   # far-past / far-future schedule
+        helper = _iv_read_grid(sheets, fid, INTERVIEW_HELPER_TAB)
+        batch_name  = _iv_label_value(helper, "Batch Name (Class)")
+        batch_title = _iv_label_value(helper, "Batch Title / Duration")
+        # Interviewer Name — read straight from the Interview_Helper tab (present
+        # only in the latest schedule files, just below "Batch Title / Duration:").
+        # Older files lack it -> stays blank; we NEVER fall back to the Instructor.
+        interviewer_name = _iv_label_value(helper, "Interviewer Name")
+        for tcell, cname in _iv_feedback_rows(_iv_read_grid(sheets, fid, INTERVIEW_FEEDBACK_TAB)):
+            slot = _iv_parse_slot(tcell)
+            if slot is None:
+                continue
+            idate, sdt, slabel, disp = slot
+            msg_day, call_day = _iv_reminder_days(idate)
+            if report_date == msg_day:
+                action = "message"
+            elif report_date == call_day:
+                action = "call"
+            else:
+                continue
+            dk = (idate, action, _norm_name(cname), sdt.strftime("%H:%M"))
+            if dk in seen:
+                continue
+            seen.add(dk)
+            key = (_norm_name(batch_name), _norm_name(batch_title), idate, action)
+            g = groups.setdefault(key, {
+                "batch_name": batch_name, "batch_title": batch_title,
+                "interviewer_name": interviewer_name,
+                "interview_date": idate, "action": action, "candidates": []})
+            g["candidates"].append({"sort": sdt, "time_disp": disp,
+                                    "start_label": slabel, "name": cname})
+
+    out = []
+    for g in groups.values():
+        g["candidates"].sort(key=lambda c: c["sort"])
+        g["batch_time_label"] = g["candidates"][0]["start_label"] if g["candidates"] else ""
+        out.append(g)
+    out.sort(key=lambda g: (g["interview_date"], _norm_name(g["batch_name"]),
+                            0 if g["action"] == "message" else 1))
+    return out
+
+
+def _iv_write_row(ws, row_num, values, why_runs, bg, why_bg, bold):
+    for col_name in IV_COLS:
+        cidx = _IVC[col_name]
+        if col_name == "Why Flagged":
+            wc = ws.cell(row=row_num, column=cidx)
+            rt = _why_flagged_richtext(why_runs)
+            wc.value = rt
+            wc.fill = AR._fill(why_bg)
+            wc.font = AR._font(size=10, color=AR.C_RED_DARK if isinstance(rt, str) else "333333")
+            wc.alignment = AR._align("left", "center", wrap=True)
+            wc.border = AR._border()
+        else:
+            h_align = "center" if col_name == "Phone" else "left"
+            AR.style_data_cell(ws, row_num, cidx, values.get(col_name, ""),
+                               bg=bg, bold=bold, h_align=h_align, wrap=True)
+    ws.row_dimensions[row_num].height = 46
+
+
+def _iv_finish(ws, row_num):
+    from openpyxl.utils import get_column_letter
+    ws.auto_filter.ref = f"A2:{get_column_letter(IVN)}{max(row_num - 1, 2)}"
+    ws.freeze_panes = "A3"
+    AR.auto_col_width(ws)
+    ws.column_dimensions[get_column_letter(_IVC["Why Flagged"])].width = 66
+    ws.column_dimensions[get_column_letter(_IVC["Interview Time"])].width = 26
+    ws.column_dimensions[get_column_letter(_IVC["Batch Title / Duration"])].width = 24
+    ws.column_dimensions[get_column_letter(_IVC["Candidate Name"])].width = 24
+
+
+def build_interview_reminders(ws, sheets, drive, service, att_agg,
+                              report_date, period_label=None):
+    """Learner Instructor Interview Reminder tab. Interviewer row first (distinct
+    background), then learner rows sorted by interview time; a coloured banner
+    separates each batch/interview. The interviewer comes from the schedule file's
+    Interview_Helper tab (never the batch Instructor). Additive only."""
+    title = (f"IntelliBI  |  Batch Coordinator — Learner & Instructor Interview "
+             f"Reminders  |  {period_label or report_date.strftime('%d-%b-%Y')}")
+    AR.style_title_row(ws, 1, 1, IVN, title)
+    ws.cell(row=1, column=1).alignment = AR._align("center", "center")
+    AR.write_header_row(ws, 2, IV_COLS)
+    row_num = 3
+
+    try:
+        groups = load_interview_reminders(sheets, drive, report_date)
+    except Exception as e:                              # never break the report
+        log.exception("Interview reminder tab failed to load: %s", e)
+        groups = []
+
+    if not groups:
+        AR.write_section_banner(ws, row_num, IVN,
+                                "  No interview follow-ups due today.",
+                                AR.C_GREEN_DARK, h_align="center")
+        _iv_finish(ws, row_num + 1)
+        return ws
+
+    iv_phone_idx = load_interviewer_phone_index(service)   # Instructor tab -> phone
+    ph_full, ph_name = _iv_phone_index(att_agg)
+
+    for g in groups:
+        bname  = g["batch_name"] or "—"
+        btitle = g["batch_title"] or "—"
+        idate  = g["interview_date"]
+        action = g["action"]
+        date_label = idate.strftime("%d-%b-%Y")
+        action_txt = "MESSAGE (2 days prior)" if action == "message" else "CALL (1 day prior)"
+        # ── batch/interview separator banner ─────────────────────────────────
+        AR.write_section_banner(
+            ws, row_num, IVN,
+            f"  Interview — {bname}   ·   {btitle}   ·   {date_label}"
+            f"      Today: {action_txt}",
+            AR.C_TEAL, h_align="left")
+        ws.row_dimensions[row_num].height = 24
+        row_num += 1
+
+        # ── Interviewer reminder — FIRST record, distinct blue background ─────
+        # Interviewer identity comes ONLY from the schedule file (Interview_Helper);
+        # phone from the Instructor master tab (Active→Inactive, exact→initial). No
+        # fallback to the batch Instructor. Name/phone stay blank when unavailable;
+        # the record is always kept and Why Flagged explains any gap.
+        interviewer = str(g.get("interviewer_name", "") or "").strip()
+        batch_time = g["batch_time_label"] or "—"
+        if interviewer:
+            iv_phone = _iv_match_interviewer_phone(iv_phone_idx, interviewer)
+            iv_name_cell = f"Interviewer: {interviewer}"
+            iv_note = (None if iv_phone else
+                       "Interviewer phone number not available — please look it up "
+                       "before following up.")
+        else:
+            iv_phone = ""
+            iv_name_cell = ""            # keep blank; never fall back to Instructor
+            iv_note = ("Interviewer name not provided in the interview schedule — "
+                       "please identify the interviewer before following up.")
+        _iv_write_row(ws, row_num, {
+            "Interview Time": f"{date_label}  from {batch_time}",
+            "Batch Name (Class)": bname,
+            "Batch Title / Duration": btitle,
+            "Candidate Name": iv_name_cell,
+            "Phone": iv_phone,           # blank when not found (no placeholder)
+        }, _iv_interviewer_runs(action, interviewer, batch_time, date_label, iv_note),
+           bg=AR.C_BLUE_LITE, why_bg=AR.C_BLUE_PALE, bold=True)
+        row_num += 1
+
+        # ── Learner reminders — sorted by interview time ascending ───────────
+        for i, c in enumerate(g["candidates"]):
+            phone = _iv_resolve_phone(ph_full, ph_name, c["name"], bname)
+            alt = AR.C_WHITE if i % 2 == 0 else AR.C_ROW_ALT
+            _iv_write_row(ws, row_num, {
+                "Interview Time": c["time_disp"],
+                "Batch Name (Class)": bname,
+                "Batch Title / Duration": btitle,
+                "Candidate Name": c["name"],
+                "Phone": phone or "—",
+            }, _iv_learner_runs(action, c["name"], c["start_label"], date_label),
+               bg=alt, why_bg=AR.C_AMBER_PALE, bold=False)
+            row_num += 1
+
+    _iv_finish(ws, row_num)
+    return ws
+
+
 def _generate_daily(service, report_date, sess_agg, att_agg, fb_agg, tf_agg, susp_agg):
     """Daily report for `report_date` — unchanged daily logic/tabs/upload; only the
     report date is a parameter and aggregates are sliced as-of that date."""
@@ -2262,6 +2800,16 @@ def _generate_daily(service, report_date, sess_agg, att_agg, fb_agg, tf_agg, sus
     build_instructor_followups(wb.create_sheet("Instructor Follow-Ups"),
                                sess_daily, att_daily, fb_daily, tf_daily,
                                instr_phones, report_date)
+    # Learner Instructor Interview Reminder — upcoming-interview follow-ups
+    # (Message 2 days prior / Call 1 day prior; Sundays skipped and shifted back).
+    # Additive tab only; wrapped so it can never block the rest of the report.
+    try:
+        _iv_sheets, _iv_drive = _iv_services()
+        build_interview_reminders(
+            wb.create_sheet("Learner Instructor Interview Reminder"),
+            _iv_sheets, _iv_drive, service, att_agg, report_date)
+    except Exception as _ive:
+        log.exception("Interview Reminder tab skipped (%s).", _ive)
     buf = io.BytesIO()
     wb.save(buf)
     # Filename carries the report period ("duration"), same convention/transform
