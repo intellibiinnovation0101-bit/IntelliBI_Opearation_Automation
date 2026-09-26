@@ -1,6 +1,6 @@
 """
-Harness for the Step 5c attendance reconcile fix (run from anywhere:
-  python tests/test_attendance_reconcile.py). Runs the REAL transform() and
+Verification of the Step 5c attendance reconcile fix (run from the project root:
+  python ops_validation\\verify_attendance_reconcile.py). Runs the REAL transform() and
 backfill_recent_attendance() of pySessionAttendanceStudentTeacherFeedbacks.py
 against an in-memory fake Google Sheet + fake LMS API, reproducing the reported
 case generically (a session first synced with every participant at duration 0,

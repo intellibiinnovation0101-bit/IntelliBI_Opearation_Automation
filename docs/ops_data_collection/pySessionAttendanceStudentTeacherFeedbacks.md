@@ -41,7 +41,7 @@ None — data-refresh job.
 - Cache under project `cache/session_attendance/`.
 
 ## Known issues
-- **Resolved 2026-09-26 — a session showed 0 Present although the LMS showed attendance.** Root cause: the scheduled run synced the session BEFORE the LMS had finalised its attendance (same-day run while the class was on / minutes after it ended), so every participant was written with duration 0 = "Absent". The tab is append-only and Step 5c deduplicated on `session_id+student_id`, so those rows were frozen forever and the report (which simply counts `status == Present`) kept showing 0. Fix: Step 5c now refreshes existing rows whose facts changed (see Execution flow, step 4). Regression test: `python tests/test_attendance_reconcile.py`.
+- **Resolved 2026-09-26 — a session showed 0 Present although the LMS showed attendance.** Root cause: the scheduled run synced the session BEFORE the LMS had finalised its attendance (same-day run while the class was on / minutes after it ended), so every participant was written with duration 0 = "Absent". The tab is append-only and Step 5c deduplicated on `session_id+student_id`, so those rows were frozen forever and the report (which simply counts `status == Present`) kept showing 0. Fix: Step 5c now refreshes existing rows whose facts changed (see Execution flow, step 4). Verification script: `python ops_validation\verify_attendance_reconcile.py`.
 - A report generated while a session is still live (or within minutes of its end, before the LMS publishes durations) can only show the attendance known at that moment; the next pipeline run corrects the sheet automatically.
 - Watermark logic assumes source timestamps are monotonic; out-of-order backfills in the source may need a manual watermark reset (clear the `Watermark_Attendance` tab to force a full reload).
 
@@ -49,7 +49,7 @@ None — data-refresh job.
 - Configurable initial backfill date and institute id via `config.yaml`.
 
 ## Change history
-- 2026-09-26 — Step 5c refreshes stale Attendance rows in place (`reconcile_attendance_rows`, `ATTENDANCE_FACT_COLUMNS`), re-aligns Sessions afterwards, new `--backfill-days N` option; test `tests/test_attendance_reconcile.py`. No change to the watermark engine, feedback tabs, report script or output format.
+- 2026-09-26 — Step 5c refreshes stale Attendance rows in place (`reconcile_attendance_rows`, `ATTENDANCE_FACT_COLUMNS`), re-aligns Sessions afterwards, new `--backfill-days N` option; verification script `ops_validation/verify_attendance_reconcile.py`. No change to the watermark engine, feedback tabs, report script or output format.
 - 2026-08-24 — Moved into Operations project; portability + cache/credentials paths made project-root-relative; Wise import switched to `wise_config`. No business-logic change.
 
 ## Email Summary Metrics

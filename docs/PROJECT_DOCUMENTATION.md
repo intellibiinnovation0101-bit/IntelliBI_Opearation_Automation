@@ -54,6 +54,7 @@ Per-script docs are in `docs/ops_data_collection/` and `docs/ops_reports_action/
 IntelliBI_Operations_Automation/
 ├── ops_data_collection/     Layer 1 entry scripts
 ├── ops_reports_action/      Layer 2 entry scripts
+├── ops_validation/          verify_*.py — offline verification of the attendance reconcile
 ├── common/                  shared code + portability layer
 │   ├── paths.py             PROJECT_ROOT + all folders (pathlib)
 │   ├── _bootstrap.py        sys.path + env defaults + config.yaml (imported first)
