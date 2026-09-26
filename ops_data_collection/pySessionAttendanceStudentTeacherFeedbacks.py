@@ -36,8 +36,14 @@ HOW INCREMENTAL LOAD WORKS:
   - Data is fetched in 30-day chunks (API uses date-range pagination).
 
 WRITE MODE:
-  Pure append (no upsert). The incremental filter ensures no duplicates as
-  long as the watermark sheet is intact.
+  Append for new rows (the incremental filter ensures no duplicates as long as
+  the watermark sheet is intact). Two tabs are additionally kept CURRENT:
+    - Sessions   : upserted by session_id (upsert_sessions).
+    - Attendance : Step 5c re-fetches the last BACKFILL_LOOKBACK_DAYS days fresh
+                   and refreshes, in place, any existing row whose attendance
+                   facts changed since it was first written — a session synced
+                   before the LMS finalised its attendance is no longer frozen
+                   as all-"Absent" (reconcile_attendance_rows).
 ================================================================================
 """
 
@@ -79,6 +85,15 @@ CHUNK_DAYS           = 30    # Split date range into 30-day windows per API call
 # backfill_recent_attendance() header). Recovers such rows without moving the
 # watermark. Generic; no technology/date/session is hard-coded.
 BACKFILL_LOOKBACK_DAYS = 7
+# Step 5c also REFRESHES attendance rows already in the sheet whose facts changed
+# since they were first written (a session synced before the LMS finalised its
+# attendance is written all-"Absent"; append-only + dedup would freeze that
+# forever). Only these per-row FACT columns are ever refreshed, by column NAME;
+# every other column on the row (suspend_status, course, tutor …) is left as is.
+ATTENDANCE_FACT_COLUMNS = [
+    "session_start_ist", "session_end_ist", "duration", "attendance_percent",
+    "first_join_ist", "last_leave_ist", "status", "student_name", "email",
+]
 
 # ── Force full refresh ────────────────────────────────────────────────────────
 # Add tab names here to force a one-time full reload (clears existing data,
@@ -1484,9 +1499,13 @@ def backfill_session_scheduled_times(service, window_sessions):
 #  This pass re-fetches ONLY the last BACKFILL_LOOKBACK_DAYS days FRESH (cache
 #  bypassed so the 24h empty-attendance cache can't hide finalised data), seeds the
 #  per-row dedup keys from what is already in the sheet, and appends only rows that
-#  are genuinely new. It NEVER advances the watermark and CANNOT create duplicates,
-#  so the normal incremental engine is completely untouched. Fully generic — it
-#  recovers any technology/session whose facts finalise after the first sync.
+#  are genuinely new. Attendance rows that already exist are compared with the
+#  fresh data and REFRESHED in place when their facts changed (a row written while
+#  the session was still on / before the LMS finalised attendance is otherwise
+#  frozen as "Absent" — see reconcile_attendance_rows). It NEVER advances the
+#  watermark and CANNOT create duplicates, so the normal incremental engine is
+#  completely untouched. Fully generic — it recovers any technology/session whose
+#  facts finalise after the first sync.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _read_tab_values(service, tab_name: str) -> list:
@@ -1631,6 +1650,132 @@ def upsert_sessions(service, fresh_rows: list):
           f"{n_new} appended → {new_count} unique session(s).")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  ATTENDANCE RECONCILE  (root-cause fix for "0 Present" on a session the LMS
+#  shows as attended)
+#
+#  The Attendance tab is append-only and Step 5c dedups on session_id+student_id.
+#  A session that is synced BEFORE the LMS has finalised its attendance — e.g. a
+#  same-day run before/while the class is on, or minutes after it ended while the
+#  LMS is still computing durations — is written with every participant at
+#  duration 0 / "Absent". Because the key already exists, neither the watermark
+#  engine (strict start-time >) nor the old 5c (append-only) could ever revise
+#  those rows, so the report kept showing 0 Present / all Absent for that session
+#  even though the LMS showed the real attendance.
+#
+#  reconcile_attendance_rows() compares the FRESH rows of the recent window with
+#  what is already in the sheet, key by key, and REFRESHES in place the rows whose
+#  attendance facts changed (ATTENDANCE_FACT_COLUMNS, matched by column NAME).
+#  Rules: a fresh blank never erases a value; an existing "Present" is never
+#  downgraded to "Absent"; rows that already agree are not touched; keys not in
+#  the sheet are returned to be appended exactly as before. Fully generic — no
+#  technology, batch, date, session or count is special-cased.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _att_cell(v) -> str:
+    return "" if v is None else str(v).strip()
+
+
+def _att_same(col: str, a: str, b: str) -> bool:
+    """Value equality for a fact column — numeric columns compare as numbers so
+    '0' vs '0.0' or '40.00%' vs '40%' never count as a change."""
+    if a == b:
+        return True
+    if col in ("duration", "attendance_percent"):
+        try:
+            return abs(float(a.replace("%", "")) - float(b.replace("%", ""))) < 1e-6
+        except ValueError:
+            return False
+    return False
+
+
+def _attendance_needs_refresh(old: dict, fresh: dict, cols: list) -> bool:
+    """True when the fresh row carries a non-blank fact that differs from the
+    sheet row. Never asks to downgrade an existing Present to Absent."""
+    if _att_cell(old.get("status")).lower() == "present" and \
+            _att_cell(fresh.get("status")).lower() != "present":
+        return False
+    for c in cols:
+        nv = _att_cell(fresh.get(c))
+        if not nv:
+            continue                                   # blank never erases
+        if not _att_same(c, _att_cell(old.get(c)), nv):
+            return True
+    return False
+
+
+def reconcile_attendance_rows(service, fresh_rows: list, synced_at: str):
+    """Split the fresh window rows into (rows_to_append, n_refreshed): rows whose
+    session_id+student_id is NOT in the sheet are returned for the normal append;
+    rows that ARE in the sheet but whose facts changed are updated in place here.
+    Read errors fall back to 'append only what is missing' via the caller's seeded
+    dedup, so a transient failure can never duplicate or lose a row."""
+    fresh_rows = [r for r in (fresh_rows or []) if r.get("session_id") and r.get("student_id")]
+    vals = _read_tab_values(service, ATTENDANCE_TAB)
+    if len(vals) < 2:
+        return fresh_rows, 0                           # empty tab → everything is new
+
+    hdr = [str(h).strip() for h in vals[0]]
+    pos = {h: i for i, h in enumerate(hdr)}
+    if "session_id" not in pos or "student_id" not in pos:
+        print("[Backfill 5c] Attendance header has no session_id/student_id — refresh skipped.")
+        return fresh_rows, 0
+    cols = [c for c in ATTENDANCE_FACT_COLUMNS if c in pos]     # only columns the sheet has
+
+    # key → [(sheet_row_number, row_values), …]  (all occurrences, in case of dups)
+    index = {}
+    for ri, row in enumerate(vals[1:], start=2):
+        sid  = _att_cell(row[pos["session_id"]]) if pos["session_id"] < len(row) else ""
+        stid = _att_cell(row[pos["student_id"]]) if pos["student_id"] < len(row) else ""
+        if sid and stid:
+            index.setdefault(f"{sid}_{stid}", []).append((ri, row))
+
+    new_rows, updates, per_session = [], [], {}
+    last_letter = _col_letter(len(hdr) - 1)
+    for fr in fresh_rows:
+        hits = index.get(f"{fr['session_id']}_{fr['student_id']}")
+        if not hits:
+            new_rows.append(fr)
+            continue
+        for ri, row in hits:
+            old = {h: (row[i] if i < len(row) else "") for h, i in pos.items()}
+            if not _attendance_needs_refresh(old, fr, cols):
+                continue
+            merged = dict(old)
+            for c in cols:                              # facts: fresh wins unless blank
+                nv = _att_cell(fr.get(c))
+                if nv:
+                    merged[c] = nv
+            if "synced_at" in pos:
+                merged["synced_at"] = synced_at
+            if "suspend_status" in pos and not _att_cell(old.get("suspend_status")):
+                merged["suspend_status"] = _att_cell(fr.get("suspend_status"))
+            updates.append({"range": f"{ATTENDANCE_TAB}!A{ri}:{last_letter}{ri}",
+                            "values": [[str(merged.get(h, "")) for h in hdr]]})
+            st = per_session.setdefault(fr["session_id"], {
+                "course": fr.get("course_name", ""), "date": str(fr.get("session_start_ist", ""))[:10],
+                "rows": 0, "to_present": 0})
+            st["rows"] += 1
+            if _att_cell(old.get("status")).lower() != "present" and \
+                    _att_cell(fr.get("status")).lower() == "present":
+                st["to_present"] += 1
+
+    if updates:
+        for i in range(0, len(updates), 500):           # keep each API call small
+            service.spreadsheets().values().batchUpdate(
+                spreadsheetId=SHEET_ID,
+                body={"valueInputOption": "RAW", "data": updates[i:i + 500]},
+            ).execute()
+        print(f"[Backfill 5c] ✓ Refreshed {len(updates)} attendance row(s) whose facts changed "
+              f"since first sync, across {len(per_session)} session(s):")
+        for sid, st in per_session.items():
+            print(f"    {sid} | {st['course']} | {st['date']} | rows refreshed={st['rows']} "
+                  f"| Absent→Present={st['to_present']}")
+    else:
+        print("[Backfill 5c] Existing attendance rows already match the LMS — nothing to refresh.")
+    return new_rows, len(updates)
+
+
 def _seed_seen_from_sheet(service) -> dict:
     """Build dedup sets from the rows ALREADY in the sheet, using the exact same
     keys transform() uses, so a re-processed session never duplicates rows."""
@@ -1668,26 +1813,42 @@ def _seed_seen_from_sheet(service) -> dict:
     return seen
 
 
-def backfill_recent_attendance(service, synced_at: str, use_cache: bool = False):
+def backfill_recent_attendance(service, synced_at: str, use_cache: bool = False,
+                               lookback_days: int = None) -> int:
     """Recover attendance/feedback that finalised after a session's first sync.
-    Additive, deduped against the sheet, and watermark-neutral (see Step 5c header)."""
+    Deduped against the sheet and watermark-neutral (see Step 5c header). Missing
+    rows are appended; existing attendance rows whose facts changed are refreshed
+    in place (see reconcile_attendance_rows). Returns the number of refreshed
+    attendance rows so the caller can re-align the Sessions tab."""
+    refreshed = 0
     try:
+        days  = int(lookback_days) if lookback_days else BACKFILL_LOOKBACK_DAYS
         today = datetime.now(IST).date()
-        start = today - timedelta(days=BACKFILL_LOOKBACK_DAYS)
+        start = today - timedelta(days=days)
         print(f"\n[Backfill 5c] Late-attendance backfill — window {start} → {today} (FRESH)")
 
-        # 1. Re-fetch the recent window FRESH (bypass caches so finalised data shows).
-        window_sessions = fetch_all_sessions([(str(start), str(today))])
+        # 1. Re-fetch the recent window FRESH (bypass caches so finalised data shows),
+        #    in CHUNK_DAYS pieces so a wide one-off repair window is also safe.
+        chunks, cursor = [], start
+        while cursor <= today:
+            chunk_end = min(cursor + timedelta(days=CHUNK_DAYS - 1), today)
+            chunks.append((str(cursor), str(chunk_end)))
+            cursor = chunk_end + timedelta(days=1)
+        window_sessions = fetch_all_sessions(chunks)
         if not window_sessions:
             print("[Backfill 5c] No sessions in window — nothing to backfill.")
-            return
+            return 0
 
         # Heal blank/garbage scheduled start/end for existing rows in this window
         # (same fresh fetch), so Scheduled/Diff populate in the reports.
         backfill_session_scheduled_times(service, window_sessions)
 
-        # 2. Seed dedup keys from what is already in the sheet.
+        # 2. Seed dedup keys from what is already in the sheet. Attendance is NOT
+        #    seeded: every fresh attendance row of the window is produced so that
+        #    reconcile_attendance_rows() can compare it with the sheet — rows already
+        #    present are refreshed only if their facts changed, never re-appended.
         seen = _seed_seen_from_sheet(service)
+        seen["a"] = set()
 
         # 3. Per-class suspension lookup, exactly as the main run does.
         class_ids = set()
@@ -1704,21 +1865,28 @@ def backfill_recent_attendance(service, synced_at: str, use_cache: bool = False)
         output, counts, _ = transform(window_sessions, full_wm, synced_at,
                                       suspended_by_class, use_cache=use_cache, seen=seen)
 
+        # 5. Reconcile attendance with the sheet: refresh changed rows in place,
+        #    keep only genuinely-missing rows for the append below.
+        output["Attendance"], refreshed = reconcile_attendance_rows(
+            service, output.get("Attendance", []), synced_at)
+        counts["Attendance"] = len(output["Attendance"])
+
         total_new = sum(len(v) for v in output.values())
         if total_new == 0:
             print("[Backfill 5c] No missing rows found — everything already in sheet.")
-            return
+            return refreshed
 
         print(f"[Backfill 5c] Recovering → Attendance:{counts.get('Attendance', 0)} "
               f"Student_FB:{counts.get('Student_Feedback', 0)} "
               f"Teacher_FB:{counts.get('Teacher_Feedback', 0)} "
               f"Sessions:{counts.get('Sessions', 0)}")
 
-        # 5. Append only. Watermarks are intentionally NOT written here — the normal
+        # 6. Append only. Watermarks are intentionally NOT written here — the normal
         #    incremental engine keeps full ownership of the watermark.
         write_all_tabs(service, output)
     except Exception as e:
         print(f"[Backfill 5c] ⚠ Error during attendance backfill: {e}")
+    return refreshed
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1783,6 +1951,12 @@ def main():
     parser.add_argument(
         "--full-load", action="store_true",
         help="Ignore watermarks and do a full reload of all sheets (deletes & recreates tabs)",
+    )
+    parser.add_argument(
+        "--backfill-days", type=int, default=None, metavar="N",
+        help=(f"Step 5c window in days (default {BACKFILL_LOOKBACK_DAYS}). Use a larger "
+              "value ONCE to repair attendance rows older than the default window; "
+              "watermarks are never touched."),
     )
     args = parser.parse_args()
     use_cache = REFRESH_MODE != "force-refresh"
@@ -1860,7 +2034,17 @@ def main():
     # Recovers rows for sessions synced before their attendance finalised (the
     # strict start-time watermark can otherwise never re-admit them). Additive,
     # deduped, and watermark-neutral — see backfill_recent_attendance() header.
-    backfill_recent_attendance(service, synced_at, use_cache=False)
+    # Existing rows whose attendance facts changed (e.g. synced before the LMS
+    # finalised them) are refreshed in place — see reconcile_attendance_rows().
+    refreshed = backfill_recent_attendance(service, synced_at, use_cache=False,
+                                           lookback_days=args.backfill_days)
+
+    # ── Step 5e: Attendance changed → re-align Sessions to it (5b/5b2 ran before
+    #    5c and would otherwise only see the refreshed values on the NEXT run).
+    if refreshed:
+        print(f"\n[Sync] {refreshed} attendance row(s) refreshed — re-aligning Sessions …")
+        backfill_session_end_times(service)
+        sync_session_actual_times(service)
 
     # ── Step 6: Write watermarks ───────────────────────────────────────────────
     write_watermarks(service, watermarks, counts, max_ist)

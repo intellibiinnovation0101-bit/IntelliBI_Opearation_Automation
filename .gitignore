@@ -43,3 +43,9 @@ Thumbs.db
 ~$*
 *.log
 *.tmp
+
+# Never commit service-account keys anywhere
+**/service_account.json
+
+# local backup folders
+**/_to_delete/
