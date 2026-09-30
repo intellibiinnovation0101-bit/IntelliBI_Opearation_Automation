@@ -65,6 +65,7 @@ if _BASE_DIR not in sys.path:
 
 import pandas as pd
 import openpyxl
+import api_retry          # common/api_retry.py — transient-error retry for Google API calls
 from openpyxl.styles    import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils     import get_column_letter
 
@@ -354,10 +355,16 @@ def report_title(report_type: str, label: str, sheet_name: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def read_sheet_df(service, spreadsheet_id: str, tab: str) -> pd.DataFrame:
-    result = service.spreadsheets().values().get(
-        spreadsheetId=spreadsheet_id,
-        range=f"{tab}!A:ZZ",
-    ).execute()
+    # Transient failures (network time-out / connection reset on the way to
+    # Google, token-endpoint hiccups, HTTP 429/5xx) are retried with back-off
+    # instead of killing the whole run at the very first read. Permanent errors
+    # (401/403/404, a missing tab) still raise immediately, exactly as before.
+    result = api_retry.call_with_retry(
+        lambda: service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=f"{tab}!A:ZZ",
+        ).execute(),
+        f"Sheets: read {tab}", log=print)
     values = result.get("values", [])
     if len(values) < 2:
         return pd.DataFrame()
@@ -522,8 +529,10 @@ def load_all_data(service, start_date: date, end_date: date, time_window=None):
         print("[Data] Skipped end_time_ist backfill (required columns missing: "
               f"sessions={list(sess_f.columns)[:8]}… attendance={list(att_f.columns)[:8]}…)")
 
+    _tf_given = len(teacher_feedback_session_ids(tf_f))
     print(f"[Data] Filtered → Sessions: {len(sess_f)} | Attendance: {len(att_f)} "
-          f"(+{len(att_susp)} suspended) | Student FB: {len(fb_f)} | Teacher FB: {len(tf_f)}")
+          f"(+{len(att_susp)} suspended) | Student FB: {len(fb_f)} | Teacher FB: {len(tf_f)} "
+          f"(with feedback content: {_tf_given}, completion-only placeholders: {len(tf_f) - _tf_given})")
     return sess_f, att_f, fb_f, tf_f, att_susp
 
 
@@ -1897,6 +1906,35 @@ def build_feedback_rating(ws, sess_f: pd.DataFrame, att_f: pd.DataFrame,
 #  SHEET 5 — TEACHER NO FEEDBACK
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Instructor feedback "received" rule (shared by every report that checks it) ──
+# The LMS returns a teacherFeedback record for a session as soon as the
+# instructor marks it Completed (session_status = COMPLETED, created_at = the
+# moment the session ended) — BEFORE any feedback is written. Such a row has no
+# "Topics covered" / "Comments" answers, and the LMS itself shows the session as
+# "Instructor Feedback: Pending". So a Teacher_Feedback row alone does not mean
+# feedback was given; the row must carry feedback CONTENT.
+TEACHER_FB_CONTENT_COLS = ("topics_covered", "comments")
+_TF_BLANKS = ("", "nan", "none", "nat", "null")
+
+
+def teacher_feedback_session_ids(tf_df: pd.DataFrame) -> set:
+    """session_ids whose instructor session feedback was actually SUBMITTED: a
+    Teacher_Feedback row with at least one non-blank content column
+    (TEACHER_FB_CONTENT_COLS). A row that has only the completion stamp
+    (blank topics + blank comments) is a placeholder and does NOT count.
+    If the frame has none of the content columns (older layout) every row
+    counts, i.e. the previous presence-only behaviour."""
+    if tf_df is None or tf_df.empty or "session_id" not in tf_df.columns:
+        return set()
+    content_cols = [c for c in TEACHER_FB_CONTENT_COLS if c in tf_df.columns]
+    if not content_cols:
+        return set(tf_df["session_id"].dropna().unique())
+    has_content = pd.Series(False, index=tf_df.index)
+    for c in content_cols:
+        has_content |= ~tf_df[c].astype(str).str.strip().str.lower().isin(_TF_BLANKS)
+    return set(tf_df.loc[has_content, "session_id"].dropna().unique())
+
+
 def build_teacher_no_feedback(ws, sess_f: pd.DataFrame, tf_f: pd.DataFrame,
                                report_type: str, label: str,
                                att_f: pd.DataFrame = None, yest_date=None):
@@ -1920,8 +1958,9 @@ def build_teacher_no_feedback(ws, sess_f: pd.DataFrame, tf_f: pd.DataFrame,
     ws.cell(row=1, column=1).alignment = _align("center", "center")
     write_header_row(ws, 3, headers)
 
-    # Use TEACHER feedback to determine which sessions have teacher feedback submitted
-    sessions_with_fb = set(tf_f["session_id"].dropna().unique()) if not tf_f.empty else set()
+    # Use TEACHER feedback to determine which sessions have teacher feedback
+    # submitted — a row must carry feedback content (see teacher_feedback_session_ids).
+    sessions_with_fb = teacher_feedback_session_ids(tf_f)
     row_num = 4
 
     if att_f is None:
@@ -3390,8 +3429,7 @@ def build_period_teacher_no_feedback(ws, sess_f: pd.DataFrame, tf_f: pd.DataFram
         if k not in sess_f.columns:
             sess_f[k] = ""
 
-    tf_sids = set(tf_f["session_id"].tolist()) \
-              if not tf_f.empty and "session_id" in tf_f.columns else set()
+    tf_sids = teacher_feedback_session_ids(tf_f)      # content-bearing rows only
 
     # Collect all rows first so we can sort by Coverage % ascending
     teacher_rows = []

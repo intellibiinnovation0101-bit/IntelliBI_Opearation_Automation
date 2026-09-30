@@ -44,6 +44,10 @@ pipeline:
   quota_retries: 2                   # auto-retry a script that FAILED only due to a
                                      # Google API 429 / quota error (non-quota fails are not retried)
   quota_retry_wait_seconds: 70       # wait before a quota retry (the per-minute quota resets)
+  api_retry_attempts: 5              # per Google Sheets read (common/api_retry.py): total calls
+  api_retry_base_wait_sec: 10        # first wait; doubles each retry (10, 20, 40, 80 s) —
+                                     # covers a network time-out / reset or a 429 / 5xx at the
+                                     # start of a report instead of failing the whole run
 
 # -----------------------------------------------------------------------------
 #  Reference only — values that currently live inside the scripts (kept there to

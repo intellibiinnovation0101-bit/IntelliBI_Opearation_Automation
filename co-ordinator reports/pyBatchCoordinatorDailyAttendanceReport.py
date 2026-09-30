@@ -138,6 +138,33 @@ MANUAL_START_DATE     = None      # "YYYY-MM-DD"  (required when GENERATE_MANUAL
 MANUAL_END_DATE       = None      # "YYYY-MM-DD"  (required when GENERATE_MANUAL)
 
 # =============================================================================
+#  COORDINATOR FOLLOW-UP TRACKING COLUMNS  (appended to every daily action tab)
+#  ---------------------------------------------------------------------------
+#  Four columns the coordinator fills in on the generated report itself:
+#    Action Taken        dropdown, values per tab (FOLLOWUP_ACTIONS)
+#    Follow-Up Comment   free text
+#    Follow-Up Done?     dropdown Yes / No
+#    Follow-Up DateTime  stamps itself the moment Follow-Up Done? is set
+#                        (self-referencing formula, kept stable by iterative
+#                        calculation — enabled in the workbook AND on the uploaded
+#                        Google Sheet by _enable_followup_timestamps()).
+#  They are report-side input fields only: nothing in the data selection,
+#  follow-up identification or Why Flagged logic reads or depends on them.
+# =============================================================================
+FOLLOWUP_COLS = ["Action Taken", "Follow-Up Comment", "Follow-Up Done?", "Follow-Up DateTime"]
+FOLLOWUP_DONE_OPTIONS = ["Yes", "No"]
+FOLLOWUP_ACTIONS = {
+    "attendance": ["Call", "WhatsApp", "Call & WhatsApp", "Email", "No response", "Other"],
+    "assignment": ["Call", "WhatsApp", "WhatsApp Group", "Call & WhatsApp", "Email", "No response", "Other"],
+    "admission":  ["Form Send", "Form Signed", "Call", "WhatsApp", "Call & WhatsApp", "Email", "Other"],
+    "wise":       ["Corrected", "Invalid", "Call", "WhatsApp", "Call & WhatsApp", "Email", "Other"],
+    "instructor": ["Call", "WhatsApp", "Call & WhatsApp", "Email", "Other"],
+    "interview":  ["Call", "WhatsApp", "Call & WhatsApp", "Email", "Other"],
+}
+FOLLOWUP_DT_FORMAT = "dd-mmm-yyyy hh:mm:ss"      # dd-MMM-yyyy HH24:MM:SS
+FOLLOWUP_TIMEZONE  = "Asia/Kolkata"              # NOW() on the uploaded sheet = IST
+
+# =============================================================================
 #  COLUMN LAYOUT
 # =============================================================================
 STUDENT_COLS = ["Rank", "Tech Name", "Duration", "Student Name", "Phone"]
@@ -146,7 +173,7 @@ DAILY_COLS   = ["Status", "Attendance %", "Duration (min)", "Joined At",
 AGG_COLS     = ["Sessions (P/T)", "Agg Attendance %", "Agg Duration Att %",
                 "Last Present", "Absent Streak", "Feedbacks", "Feedback Part. %",
                 "Avg Rating (/10)", "Overall Remarks", "Why Flagged"]
-HEADERS = STUDENT_COLS + DAILY_COLS + AGG_COLS
+HEADERS = STUDENT_COLS + DAILY_COLS + AGG_COLS + FOLLOWUP_COLS
 N = len(HEADERS)
 _C = {h: i + 1 for i, h in enumerate(HEADERS)}   # 1-based column index by header
 _AGG_START = len(STUDENT_COLS) + len(DAILY_COLS) + 1   # first aggregate column (1-based)
@@ -174,7 +201,7 @@ INSTR_COLS = [
     "Total Enrolled", "Att. N/A Count", "Present", "Absent", "Att %",
     "Avg Time in Session %", "No. of Feedbacks", "Feedback Rate %",
     "⭐ Avg Rating(/10)", "Min Rating", "Max Rating", "Feedback Given", "Why Flagged",
-]
+] + FOLLOWUP_COLS
 IN = len(INSTR_COLS)
 _IC = {h: i + 1 for i, h in enumerate(INSTR_COLS)}   # 1-based column index by header
 
@@ -201,7 +228,7 @@ _IP = {h: i + 1 for i, h in enumerate(IP_COLS)}
 # ── Learner Assignment Follow-Ups (assignment-submission defaulters) ──────────
 #   Reuses pyAssignmentSubmissionEmailReminder's defaulter/reminder logic wholesale
 #   (find_pending_reminders → consolidate_by_student → _group_rows_by_course_assignment).
-AF_COLS = ["#", "Student Name", "Email", "Phone", "Deadline", "Reminder", "Why Flagged"]
+AF_COLS = ["#", "Student Name", "Email", "Phone", "Deadline", "Reminder", "Why Flagged"] + FOLLOWUP_COLS
 AFN = len(AF_COLS)
 _AF = {h: i + 1 for i, h in enumerate(AF_COLS)}
 # reminder stage → coordinator action (drives Why Flagged). Keyed by the reminder
@@ -233,9 +260,476 @@ _ADM_BASE_COLS = (list(ADM.REPORT_COLUMNS) if _ADM_OK else [
     "Student Name", "Email ID", "Phone Number", "Batch Name", "Joined On",
     "Request Form Name", "Recipient Status", "Request Status",
     "Sent Date", "Signed Date", "Expiry Date"])
-ADM_COLS = _ADM_BASE_COLS + ["Why Flagged"]
+ADM_COLS = _ADM_BASE_COLS + ["Why Flagged"] + FOLLOWUP_COLS
 ADMN = len(ADM_COLS)
 _ADMC = {h: i + 1 for i, h in enumerate(ADM_COLS)}   # 1-based column index by header
+
+
+# =============================================================================
+#  REPORT DESIGN SYSTEM  (presentation only — one visual language for every tab)
+#  ---------------------------------------------------------------------------
+#  Every tab of the Batch Coordinator report is laid out the same way so the
+#  coordinator can read any row left → right as:
+#        WHO / WHAT is affected  →  the numbers behind the flag  →  WHY FLAGGED
+#  and, inside "Why Flagged", each reason as   issue: figures   →  ACTION.
+#
+#    row 1   title band          navy, white bold        (tab purpose | period)
+#    row 2   guide strip         pale, small text        (how to read + colour key
+#                                                         + record count)
+#    row 3   column headers      dark navy, white bold   (optional grouped
+#                                                         super-header above it)
+#    body    white / zebra rows, thin light borders.  Colour is used ONLY where
+#            it carries meaning:
+#              • the first cell of a row = PRIORITY chip (High = red,
+#                Medium = amber, Info = blue, OK = green) with a coloured left edge
+#              • status / measure cells (Absent, No feedback, Missing, Invalid,
+#                Att %, rating …) in pale semantic tints with dark coloured text
+#              • "Why Flagged" always in the same pale-yellow action column:
+#                numbered reasons, key figures bold red, the ACTION on its own
+#                line in bold navy ("→ Call Learner")
+#    section banner   blue band with white text   (technology / batch / group)
+#    sub-banner       pale-blue band, navy text    (assignment / interview detail)
+#    empty state      pale-green band, dark-green text
+#  None of this changes what is listed or the values shown — only how they look.
+# =============================================================================
+from openpyxl.styles import Border as _DSBorder, Side as _DSSide
+from openpyxl.utils import get_column_letter as _gcl
+
+DS_NAV        = AR.C_NAV          # title band / super-header
+DS_NAV2       = AR.C_NAV2         # column headers
+DS_SECTION    = AR.C_BLUE_MID     # section banner (group)
+DS_SUB        = "DCE9F7"          # sub-banner (detail line under a group)
+DS_GUIDE      = "EEF3F8"          # guide strip
+DS_ZEBRA      = "F6F8FB"          # alternate body row
+DS_WHY        = "FFFDE7"          # "Why Flagged" action column
+DS_LINE       = "D6DCE4"          # cell borders
+DS_TEXT       = "222222"
+DS_MUTED      = "6B7280"
+# priority / semantic tints  (pale fill, dark text)
+DS_HIGH_BG,   DS_HIGH_FG   = "FDE2E2", AR.C_RED_DARK
+DS_MED_BG,    DS_MED_FG    = "FFF1DB", AR.C_AMBER_DARK
+DS_INFO_BG,   DS_INFO_FG   = "E3EEFB", "0D47A1"
+DS_OK_BG,     DS_OK_FG     = "E6F4EA", AR.C_GREEN_DARK
+DS_MUTE_BG,   DS_MUTE_FG   = "EFEFEF", "757575"
+_DS_LEVEL = {
+    "high":   (DS_HIGH_BG, DS_HIGH_FG),
+    "medium": (DS_MED_BG,  DS_MED_FG),
+    "info":   (DS_INFO_BG, DS_INFO_FG),
+    "ok":     (DS_OK_BG,   DS_OK_FG),
+    "muted":  (DS_MUTE_BG, DS_MUTE_FG),
+    "none":   (AR.C_WHITE, DS_TEXT),
+}
+_DS_SIDE = _DSSide(style="thin", color=DS_LINE)
+
+
+def ds_border(left_accent=None):
+    """Thin light border; optional medium coloured LEFT edge (priority accent)."""
+    l = _DSSide(style="medium", color=left_accent) if left_accent else _DS_SIDE
+    return _DSBorder(left=l, right=_DS_SIDE, top=_DS_SIDE, bottom=_DS_SIDE)
+
+
+def ds_level_colors(level):
+    return _DS_LEVEL.get(level or "none", _DS_LEVEL["none"])
+
+
+def ds_cell(ws, row, col, value, bg=None, fg=DS_TEXT, bold=False, italic=False,
+            h_align="left", v_align="center", wrap=False, number_fmt=None, size=10,
+            left_accent=None):
+    """One body cell in the common style. Returns the cell."""
+    c = ws.cell(row=row, column=col)
+    c.value = value
+    c.font = AR._font(bold=bold, size=size, color=fg, italic=italic)
+    c.fill = AR._fill(bg or AR.C_WHITE)
+    c.alignment = AR._align(h_align, v_align, wrap=wrap)
+    c.border = ds_border(left_accent)
+    if number_fmt:
+        c.number_format = number_fmt
+    return c
+
+
+def ds_pill(ws, row, col, text, level, bold=True, h_align="center", number_fmt=None):
+    """A status / priority chip: pale semantic fill + dark coloured bold text."""
+    bg, fg = ds_level_colors(level)
+    return ds_cell(ws, row, col, text, bg=bg, fg=fg, bold=bold, h_align=h_align,
+                   number_fmt=number_fmt)
+
+
+def ds_priority(ws, row, col, text, level, h_align="center", wrap=True):
+    """The FIRST cell of a flagged row: chip + a medium coloured left edge, so the
+    priority is visible at a glance even when the row is scrolled."""
+    bg, fg = ds_level_colors(level)
+    return ds_cell(ws, row, col, text, bg=bg, fg=fg, bold=True, h_align=h_align,
+                   left_accent=fg, wrap=wrap)
+
+
+def ds_att_bg(pct, status=""):
+    """Attendance-% heat tint — AR._att_bg's exact thresholds, in the report's
+    pale tint family (Absent / <60 = red, 60–75 = amber, 75–95 = pale green,
+    ≥95 = green)."""
+    if status == "Absent" or pct < 60:
+        return DS_HIGH_BG
+    if pct < 75:
+        return DS_MED_BG
+    if pct < 95:
+        return "F1F8F1"
+    return DS_OK_BG
+
+
+def ds_rating_bg(avg):
+    """Rating (/10) heat tint — AR._rating_bg's exact thresholds, pale family."""
+    if avg >= 8:
+        return DS_OK_BG
+    if avg >= 6:
+        return "F1F8F1"
+    if avg >= 4:
+        return DS_MED_BG
+    return DS_HIGH_BG
+
+
+def ds_zebra(i):
+    return AR.C_WHITE if i % 2 == 0 else DS_ZEBRA
+
+
+def ds_title(ws, ncols, tab_purpose, period_label, guide_text):
+    """Rows 1–2: title band + guide strip. Returns the next free row (3)."""
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncols)
+    c = ws.cell(row=1, column=1)
+    c.value = f"  IntelliBI  |  Batch Coordinator — {tab_purpose}  |  {period_label}"
+    c.font = AR._font(bold=True, size=13, color=AR.C_WHITE)
+    c.fill = AR._fill(DS_NAV)
+    c.alignment = AR._align("left", "center")
+    ws.row_dimensions[1].height = 34
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=ncols)
+    g = ws.cell(row=2, column=1)
+    g.value = "  " + guide_text
+    g.font = AR._font(size=9, color=DS_MUTED, italic=True)
+    g.fill = AR._fill(DS_GUIDE)
+    g.alignment = AR._align("left", "center", wrap=False)
+    g.border = ds_border()
+    ws.row_dimensions[2].height = 20
+    return 3
+
+
+DS_GUIDE_DEFAULT = ("Read each row left → right: who is affected → the figures behind the flag → "
+                    "Why Flagged (issue, then the ACTION in bold).   Colour key:  "
+                    "■ High = red   ■ Medium = amber   ■ Info = blue   ■ OK = green.")
+
+
+def ds_guide_count(ws, label, n):
+    """Append 'label: n' to the guide strip (row 2) once a tab is fully rendered."""
+    g = ws.cell(row=2, column=1)
+    g.value = f"{g.value}      {label}: {n}"
+
+
+def ds_headers(ws, row, headers, groups=None, height=32):
+    """Column-header row (+ optional grouped super-header row above it).
+    groups: list of (first_col, last_col, text). Returns the first body row."""
+    if groups:
+        for c0, c1, text in groups:
+            if c1 > c0:
+                ws.merge_cells(start_row=row, start_column=c0, end_row=row, end_column=c1)
+            c = ws.cell(row=row, column=c0)
+            c.value = text
+            c.font = AR._font(bold=True, size=9, color=AR.C_WHITE)
+            c.fill = AR._fill(DS_NAV)
+            c.alignment = AR._align("center", "center")
+            for cc in range(c0, c1 + 1):
+                ws.cell(row=row, column=cc).border = ds_border()
+                ws.cell(row=row, column=cc).fill = AR._fill(DS_NAV)
+        ws.row_dimensions[row].height = 18
+        row += 1
+    for col, h in enumerate(headers, 1):
+        c = ws.cell(row=row, column=col)
+        c.value = h
+        c.font = AR._font(bold=True, size=9, color=AR.C_WHITE)
+        c.fill = AR._fill(DS_NAV2)
+        c.alignment = AR._align("center", "center", wrap=True)
+        c.border = ds_border()
+    ws.row_dimensions[row].height = height
+    return row + 1
+
+
+def ds_section(ws, row, ncols, text, level=1, height=None):
+    """Full-width banner. level 1 = group (blue, white text); level 2 = detail
+    line under a group (pale blue, navy text)."""
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=ncols)
+    c = ws.cell(row=row, column=1)
+    c.value = "  " + str(text).strip()
+    if level == 1:
+        c.font = AR._font(bold=True, size=10, color=AR.C_WHITE)
+        c.fill = AR._fill(DS_SECTION)
+    else:
+        c.font = AR._font(bold=True, size=9, color=DS_NAV)
+        c.fill = AR._fill(DS_SUB)
+    c.alignment = AR._align("left", "center")
+    for cc in range(1, ncols + 1):
+        ws.cell(row=row, column=cc).border = ds_border()
+    ws.row_dimensions[row].height = height or (22 if level == 1 else 19)
+    return row + 1
+
+
+def ds_empty(ws, row, ncols, text, level="ok"):
+    """'Nothing to do' band: pale green (or grey when data is unavailable)."""
+    bg, fg = ds_level_colors(level)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=ncols)
+    c = ws.cell(row=row, column=1)
+    c.value = text
+    c.font = AR._font(bold=True, size=10, color=fg)
+    c.fill = AR._fill(bg)
+    c.alignment = AR._align("center", "center")
+    for cc in range(1, ncols + 1):
+        ws.cell(row=row, column=cc).border = ds_border()
+    ws.row_dimensions[row].height = 24
+    return row + 1
+
+
+# ---- "Why Flagged" ---------------------------------------------------------------
+_DS_ACTION_VERBS = ("call ", "message ", "send ", "share ", "understand ", "ask ", "review ",
+                    "correct ", "fill ", "add ", "fix ", "assign ", "confirm ", "identify ",
+                    "look ", "follow ", "coordinator ", "please ")
+
+
+def _ds_is_action(text):
+    t = str(text or "").strip().lower()
+    return any(t.startswith(v) for v in _DS_ACTION_VERBS)
+
+
+def _ds_split_action(runs):
+    """Split one reason's runs into (issue_runs, action_runs). The action is the
+    text after the LAST ' — ' / ' → ' / sentence break that starts with an action
+    verb (e.g. '— Call Learner', '→ fill in this field in Wise', '. Message
+    Instructor.'). If the reason itself STARTS with an action verb ('Call the
+    learner to complete …'), the part before the first ' — ' is the action and the
+    rest is the issue. Returns (runs, []) when no action is found. Purely
+    presentational: the words are unchanged, only where they are shown."""
+    flat = "".join(t for t, _ in runs)
+    cands = []                                   # (issue_end, action_start)
+    for sep, keep in ((" — ", 0), (" → ", 0), (". ", 1)):
+        i = flat.rfind(sep)
+        while i >= 0:
+            if _ds_is_action(flat[i + len(sep):]):
+                cands.append((i + keep, i + len(sep)))
+                break
+            i = flat.rfind(sep, 0, i)
+    action_first = False
+    if cands:
+        issue_end, action_start = max(cands, key=lambda c: c[1])
+    elif _ds_is_action(flat):
+        firsts = [(flat.find(sep), len(sep)) for sep in (" — ", " → ") if flat.find(sep) > 0]
+        if not firsts:
+            return runs, []
+        i, n = min(firsts)
+        issue_end, action_start, action_first = i, i + n, True
+    else:
+        return runs, []
+    a_runs, b_runs, pos = [], [], 0
+    for text, red in runs:
+        start, end = pos, pos + len(text)
+        pos = end
+        left = text[:max(0, min(len(text), issue_end - start))] if start < issue_end else ""
+        right = text[max(0, action_start - start):] if end > action_start else ""
+        if left:
+            a_runs.append((left, red))
+        if right:
+            b_runs.append((right, red))
+    if action_first:
+        return b_runs, a_runs
+    return a_runs, b_runs
+
+
+def ds_why_text(ws, row, col, reasons, col_width=70, min_height=22):
+    """Write the 'Why Flagged' cell for a row:
+         1) issue: figures            (label + key figures bold red)
+            → ACTION                  (bold navy, own line)
+         2) …
+    (a single reason uses '•' instead of a number). Sets the row height from the
+    wrapped line count so nothing is ever cut off. Returns the estimated lines."""
+    try:
+        from openpyxl.cell.rich_text import CellRichText, TextBlock
+        from openpyxl.cell.text import InlineFont
+    except Exception:                                   # very old openpyxl
+        CellRichText = None
+    reasons = [r for r in (reasons or []) if r]
+    cpl = max(20, int(col_width * 1.25))                # ~chars per wrapped line (Arial 10)
+    lines = 0
+    blocks, plain = [], []
+    if CellRichText is not None:
+        f_base = InlineFont(rFont="Arial", sz=10, color=DS_TEXT)
+        f_key = InlineFont(rFont="Arial", sz=10, b=True, color=AR.C_RED_DARK)
+        f_lbl = InlineFont(rFont="Arial", sz=10, b=True, color=DS_HIGH_FG)
+        f_act = InlineFont(rFont="Arial", sz=10, b=True, color=DS_NAV)
+        f_num = InlineFont(rFont="Arial", sz=10, b=True, color=DS_MUTED)
+    for i, runs in enumerate(reasons):
+        issue, action = _ds_split_action(runs)
+        if not issue:
+            issue, action = runs, []
+        # first letter of the issue upper-case (e.g. 'status: …' → 'Status: …')
+        t0, r0 = issue[0]
+        t0s = t0.lstrip()
+        if t0s and t0s[0].islower():
+            issue = [(t0[:len(t0) - len(t0s)] + t0s[0].upper() + t0s[1:], r0)] + list(issue[1:])
+        prefix = f"{i + 1})  " if len(reasons) > 1 else "•  "
+        issue_txt = "".join(t for t, _ in issue).strip()
+        action_txt = "".join(t for t, _ in action).strip().rstrip(".")
+        if i:
+            if CellRichText is not None: blocks.append(TextBlock(f_base, "\n"))
+            plain.append("\n")
+        if CellRichText is not None:
+            blocks.append(TextBlock(f_num, prefix))
+            for k, (text, red) in enumerate(issue):
+                blocks.append(TextBlock(f_lbl if (k == 0 and red) else (f_key if red else f_base), text))
+            if action_txt:
+                blocks.append(TextBlock(f_base, "\n      → "))
+                blocks.append(TextBlock(f_act, action_txt))
+        plain.append(prefix + issue_txt + (f"\n      → {action_txt}" if action_txt else ""))
+        lines += max(1, -(-len(prefix + issue_txt) // cpl))
+        if action_txt:
+            lines += max(1, -(-(len(action_txt) + 8) // cpl))
+    c = ws.cell(row=row, column=col)
+    c.value = CellRichText(blocks) if (CellRichText is not None and blocks) else "".join(plain)
+    c.fill = AR._fill(DS_WHY)
+    c.font = AR._font(size=10, color=DS_TEXT)
+    c.alignment = AR._align("left", "center", wrap=True)
+    c.border = ds_border()
+    need = max(min_height, 13 * lines + 8)
+    cur = ws.row_dimensions[row].height or 0
+    ws.row_dimensions[row].height = max(cur, need)
+    return lines
+
+
+def ds_fit_guide(ws, ncols):
+    """Wrap the guide strip (row 2) onto two/three lines when the tab is narrower
+    than the text, so nothing is cut off."""
+    g = ws.cell(row=2, column=1)
+    total = sum((ws.column_dimensions[_gcl(c)].width or 10) for c in range(1, ncols + 1))
+    n = len(str(g.value or ""))
+    lines = max(1, -(-n // max(40, int(total * 1.3))))
+    if lines > 1:
+        g.alignment = AR._align("left", "center", wrap=True)
+        ws.row_dimensions[2].height = 14 * lines + 6
+
+
+# ---- Coordinator follow-up block (Action Taken / Comment / Done? / DateTime) ----
+DS_INPUT_HDR = AR.C_TEAL          # header fill of the four input columns
+DS_INPUT_BG  = "F1FAF8"           # input cell background (pale teal = "yours to fill")
+_DS_FU_ROWS: dict = {}            # id(ws) -> [data rows that carry follow-up cells]
+FOLLOWUP_WIDTHS = {"Action Taken": 18, "Follow-Up Comment": 34,
+                   "Follow-Up Done?": 13, "Follow-Up DateTime": 20}
+DS_GUIDE_FOLLOWUP = ("   Teal columns are yours: pick the Action Taken, add a comment, set "
+                     "Follow-Up Done? — the DateTime stamps itself.")
+
+
+def ds_followup_headers(ws, row, first_col):
+    """Restyle the four follow-up header cells (teal) so the input area is obvious."""
+    for k, h in enumerate(FOLLOWUP_COLS):
+        c = ws.cell(row=row, column=first_col + k)
+        c.value = "✎ " + h
+        c.font = AR._font(bold=True, size=9, color=AR.C_WHITE)
+        c.fill = AR._fill(DS_INPUT_HDR)
+        c.alignment = AR._align("center", "center", wrap=True)
+        c.border = ds_border()
+
+
+def ds_followup_cells(ws, row, first_col):
+    """Write the four input cells for one flagged row and register the row for
+    the dropdowns. Follow-Up DateTime holds a self-referencing formula that
+    freezes NOW() the first time Follow-Up Done? is set (and clears again when
+    it is cleared); iterative calculation makes it stable. The `=0` guard covers
+    engines whose first pass of a self-reference starts at 0 (Excel / LibreOffice)
+    as well as Google Sheets' empty start — verified: stamps once, then holds."""
+    done = _gcl(first_col + 2)
+    dt = _gcl(first_col + 3)
+    ds_cell(ws, row, first_col, None, bg=DS_INPUT_BG, h_align="center")
+    ds_cell(ws, row, first_col + 1, None, bg=DS_INPUT_BG, h_align="left", wrap=True)
+    ds_cell(ws, row, first_col + 2, None, bg=DS_INPUT_BG, h_align="center", bold=True)
+    c = ds_cell(ws, row, first_col + 3,
+                f'=IF({done}{row}="","",IF(OR({dt}{row}="",{dt}{row}=0),NOW(),{dt}{row}))',
+                bg=DS_INPUT_BG, h_align="center", number_fmt=FOLLOWUP_DT_FORMAT)
+    _DS_FU_ROWS.setdefault(id(ws), []).append(row)
+    return c
+
+
+def _ds_ranges(col_letter, rows):
+    """'X4:X9 X12:X15' — contiguous row runs of one column for a DataValidation."""
+    out, rows = [], sorted(set(rows))
+    i = 0
+    while i < len(rows):
+        j = i
+        while j + 1 < len(rows) and rows[j + 1] == rows[j] + 1:
+            j += 1
+        out.append(f"{col_letter}{rows[i]}:{col_letter}{rows[j]}" if j > i
+                   else f"{col_letter}{rows[i]}")
+        i = j + 1
+    return " ".join(out)
+
+
+def ds_followup_apply(ws, first_col, actions):
+    """Attach the dropdowns (Action Taken = tab-specific list, Follow-Up Done? =
+    Yes/No) to every registered row of this sheet."""
+    from openpyxl.worksheet.datavalidation import DataValidation
+    rows = _DS_FU_ROWS.pop(id(ws), [])
+    if not rows:
+        return
+    dv_a = DataValidation(type="list", formula1='"' + ",".join(actions) + '"',
+                          allow_blank=True, showErrorMessage=True,
+                          errorTitle="Action Taken", error="Please pick one of the listed actions.",
+                          promptTitle="Action Taken", prompt="Choose the action you took.")
+    dv_a.sqref = _ds_ranges(_gcl(first_col), rows)
+    dv_d = DataValidation(type="list", formula1='"' + ",".join(FOLLOWUP_DONE_OPTIONS) + '"',
+                          allow_blank=True, showErrorMessage=True,
+                          errorTitle="Follow-Up Done?", error="Please choose Yes or No.",
+                          promptTitle="Follow-Up Done?",
+                          prompt="Yes / No — the DateTime column stamps itself.")
+    dv_d.sqref = _ds_ranges(_gcl(first_col + 2), rows)
+    ws.add_data_validation(dv_a)
+    ws.add_data_validation(dv_d)
+
+
+def ds_enable_iterative_calc(wb):
+    """Workbook-level iterative calculation so the self-referencing DateTime
+    formula is stable in Excel too (Google Sheets gets the same setting from
+    _enable_followup_timestamps() after upload)."""
+    try:
+        wb.calculation.iterate = True
+        wb.calculation.iterateCount = 1
+        wb.calculation.iterateDelta = 0.001
+        wb.calculation.fullCalcOnLoad = True
+    except Exception as exc:                                  # pragma: no cover
+        log.warning("Could not set iterative calculation on the workbook: %s", exc)
+
+
+def ds_finish(ws, header_row, ncols, widths=None, why_col=None, why_width=70,
+              default_width=14, filter_from=None, tab_color=None, followup=None):
+    """Freeze below the headers, autofilter, column widths, print setup, no
+    gridlines. `widths` maps header text → width; unspecified columns get
+    `default_width`. The Why-Flagged column gets `why_width`."""
+    hdr = {str(ws.cell(row=header_row, column=c).value or "").replace("✎ ", ""): c
+           for c in range(1, ncols + 1)}
+    for c in range(1, ncols + 1):
+        ws.column_dimensions[_gcl(c)].width = default_width
+    for name, w in {**FOLLOWUP_WIDTHS, **(widths or {})}.items():
+        if name in hdr:
+            ws.column_dimensions[_gcl(hdr[name])].width = w
+    if followup is not None:
+        ds_followup_apply(ws, followup[0], followup[1])
+    if why_col:
+        ws.column_dimensions[_gcl(why_col)].width = why_width
+    ds_fit_guide(ws, ncols)
+    last = max(ws.max_row, header_row)
+    ws.auto_filter.ref = f"A{filter_from or header_row}:{_gcl(ncols)}{last}"
+    ws.freeze_panes = f"A{header_row + 1}"
+    ws.sheet_view.showGridLines = False
+    ws.sheet_view.zoomScale = 90
+    try:
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.print_title_rows = f"1:{header_row}"
+    except Exception:
+        pass
+    if tab_color:
+        ws.sheet_properties.tabColor = tab_color
 
 
 def _norm_name(s) -> str:
@@ -659,12 +1153,14 @@ def load_instructor_phones(service):
 
 
 def _finish_instr(ws, row_num):
-    from openpyxl.utils import get_column_letter
-    ws.auto_filter.ref = f"A2:{get_column_letter(IN)}{max(row_num - 1, 2)}"
-    ws.freeze_panes = "A3"
-    AR.auto_col_width(ws)
-    ws.column_dimensions[get_column_letter(_IC["Why Flagged"])].width = 46
-    ws.column_dimensions[get_column_letter(_IC["Instructor"])].width = 20
+    ds_finish(ws, 4, IN, widths={
+        "Tech Name": 22, "Duration": 26, "Instructor": 18, "Phone": 15, "Session Date": 19,
+        "Duration (Mins)": 10, "Scheduled (Mins)": 10, "Diff Mins": 9, "Total Enrolled": 9,
+        "Att. N/A Count": 9, "Present": 8, "Absent": 8, "Att %": 8, "Avg Time in Session %": 11,
+        "No. of Feedbacks": 10, "Feedback Rate %": 10, "⭐ Avg Rating(/10)": 10,
+        "Min Rating": 8, "Max Rating": 8, "Feedback Given": 10,
+    }, why_col=_IC["Why Flagged"], why_width=70, default_width=10, tab_color=DS_SECTION,
+       followup=(_IC["Action Taken"], FOLLOWUP_ACTIONS["instructor"]))
 
 
 def _fmt_clock(dt):
@@ -712,24 +1208,35 @@ def build_instructor_followups(ws, sess_daily, att_daily, fb_daily, tf_daily,
     Multiple conditions collapse into ONE record; Why Flagged combines every
     applicable reason with dynamic times/numbers (key figures highlighted red).
     All metrics/columns reuse the existing Session-Summary / Feedback-Rating /
-    Teacher-No-Feedback logic exactly."""
-    title = (f"IntelliBI  |  Batch Coordinator — Instructor Follow-Ups  |  "
-             f"{period_label or report_date.strftime('%d-%b-%Y')}")
-    AR.style_title_row(ws, 1, 1, IN, title)
-    ws.cell(row=1, column=1).alignment = AR._align("center", "center")
-    AR.write_header_row(ws, 2, INSTR_COLS)
-    row_num = 3
+    Teacher-No-Feedback logic exactly.
+    Presentation: common report design system (title band, guide strip, grouped
+    headers, priority chip on Tech Name, semantic tints only on status/measure
+    cells, numbered Why-Flagged reasons with the action on its own line)."""
+    period = period_label or report_date.strftime('%d-%b-%Y')
+    ds_title(ws, IN, "Instructor Follow-Ups", period,
+             "One row per session that needs a coordinator touch. Priority chip on Tech Name: "
+             "High = call the instructor, Medium = message / remind.   "
+             "Colour key: ■ High = red  ■ Medium = amber  ■ Info = blue  ■ OK = green."
+             + DS_GUIDE_FOLLOWUP)
+    HDR_ROW = 4
+    groups = [(_IC["Tech Name"], _IC["Session Date"], "SESSION"),
+              (_IC["Duration (Mins)"], _IC["Diff Mins"], "TIMING (actual vs scheduled)"),
+              (_IC["Total Enrolled"], _IC["Avg Time in Session %"], "ATTENDANCE"),
+              (_IC["No. of Feedbacks"], _IC["Feedback Given"], "FEEDBACK"),
+              (_IC["Why Flagged"], _IC["Why Flagged"], "ACTION"),
+              (_IC["Action Taken"], _IC["Follow-Up DateTime"], "COORDINATOR FOLLOW-UP (fill in)")]
+    row_num = ds_headers(ws, 3, INSTR_COLS, groups=groups)
+    ds_followup_headers(ws, 4, _IC["Action Taken"])
 
     if sess_daily is None or sess_daily.empty:
-        AR.write_section_banner(ws, row_num, IN, "  No sessions in this period.",
-                                AR.C_GREY_BD, h_align="center")
+        ds_empty(ws, row_num, IN, "No sessions in this period.", level="muted")
         _finish_instr(ws, row_num + 1)
         return ws
 
     sess_f = AR._prefer_instructor_name(sess_daily)
-    tf_ids = (set(tf_daily["session_id"].dropna().unique())
-              if (tf_daily is not None and not tf_daily.empty and "session_id" in tf_daily.columns)
-              else set())
+    # Feedback Given = a Teacher_Feedback row WITH content (same rule as the
+    # AR Teacher_No_Feedback tab); a completion-only placeholder row does not count.
+    tf_ids = AR.teacher_feedback_session_ids(tf_daily)
 
     def _dedup_fb(sub):
         if sub is None or sub.empty:
@@ -738,6 +1245,7 @@ def build_instructor_followups(ws, sess_daily, att_daily, fb_daily, tf_daily,
         return sub.drop_duplicates(subset=cols) if cols else sub
 
     any_rendered = False
+    n_rows = 0
     _order = sess_f.sort_values(["course_name", "course_title", "start_time_ist"],
                                 na_position="last")
     for _, sess in _order.iterrows():
@@ -831,84 +1339,74 @@ def build_instructor_followups(ws, sess_daily, att_daily, fb_daily, tf_daily,
                                 (f"{n_fb} of {n_present}", True),
                                 (" students submitted feedback (", False),
                                 (f"{fb_rt:g}%", True), (") — ", False),
-                                ("Ask students to submit their session feedback.", True)])
+                                ("Ask students to submit their feedback.", True)])
         if not reasons:
             continue
 
         # ── render ───────────────────────────────────────────────────────────
-        bg = AR.C_WHITE
-        plain = {
-            "Tech Name": sess.get("course_name", ""),
-            "Duration": sess.get("course_title", ""),
-            "Instructor": instr,
-            "Phone": phone or "—",
-            "Session Date": (actual_start_dt.strftime("%Y-%m-%d %H:%M:%S")
-                             if actual_start_dt is not None
-                             else str(sess.get("start_time_ist", ""))[:19]),
-            "Duration (Mins)": dur_min if dur_min else "",
-            "Scheduled (Mins)": (round(sched_min, 1) if sched_min is not None else "—"),
-            "Diff Mins": (f"{diff_min:+.0f}" if diff_min is not None else "—"),
-            "Total Enrolled": total_enrolled,
-            "Att. N/A Count": na_cnt,
-            "Present": n_present,
-            "Absent": absent_n,
-            "No. of Feedbacks": n_fb,
-            "Min Rating": (min_r if min_r is not None else "—"),
-            "Max Rating": (max_r if max_r is not None else "—"),
-        }
-        for c in INSTR_COLS:
-            if c in plain:
-                AR.style_data_cell(ws, row_num, _IC[c], plain[c], bg=bg,
-                                   h_align="left" if c in ("Tech Name", "Duration", "Instructor")
-                                   else "center")
-        AR.style_data_cell(ws, row_num, _IC["Att %"], att_pct, bg=AR._att_bg(att_pct, ""),
-                           h_align="center", number_fmt='0.0"%"')
-        AR.style_data_cell(ws, row_num, _IC["Avg Time in Session %"], avg_time,
-                           bg=AR._att_bg(avg_time, ""), h_align="center", number_fmt='0.0"%"')
-        AR.style_data_cell(ws, row_num, _IC["Feedback Rate %"], fb_rt,
-                           bg=(AR.C_GREEN_PALE if fb_rt >= 50 else AR.C_AMBER if fb_rt > 0 else AR.C_RED_LITE),
-                           h_align="center", number_fmt='0.0"%"')
-        if avg_r is not None:
-            AR.style_data_cell(ws, row_num, _IC["⭐ Avg Rating(/10)"], avg_r,
-                               bg=AR._rating_bg(avg_r), h_align="center", number_fmt='0.0')
-        else:
-            AR.style_data_cell(ws, row_num, _IC["⭐ Avg Rating(/10)"], "—", bg=bg, h_align="center")
-
-        dc = ws.cell(row=row_num, column=_IC["Diff Mins"])
+        # Priority = the escalation the reasons themselves ask for: a "Call"
+        # reason (late start, underrun) or a cancelled session = High; message-
+        # level reasons (not 5 min early, feedback missing, low fb rate) = Medium.
+        _flat = " ".join("".join(t for t, _ in r) for r in reasons).lower()
+        level = ("high" if ("call instructor" in _flat or "session cancelled" in _flat)
+                 else "medium")
+        bg = ds_zebra(n_rows)
+        ds_priority(ws, row_num, _IC["Tech Name"], sess.get("course_name", ""), level,
+                    h_align="left")
+        ds_cell(ws, row_num, _IC["Duration"], sess.get("course_title", ""), bg=bg)
+        ds_cell(ws, row_num, _IC["Instructor"], instr, bg=bg, bold=True)
+        ds_cell(ws, row_num, _IC["Phone"], phone or "—", bg=bg, h_align="center")
+        ds_cell(ws, row_num, _IC["Session Date"],
+                (actual_start_dt.strftime("%Y-%m-%d %H:%M:%S") if actual_start_dt is not None
+                 else str(sess.get("start_time_ist", ""))[:19]), bg=bg, h_align="center")
+        ds_cell(ws, row_num, _IC["Duration (Mins)"], dur_min if dur_min else "", bg=bg,
+                h_align="center", number_fmt="0.0")
+        ds_cell(ws, row_num, _IC["Scheduled (Mins)"],
+                (round(sched_min, 1) if sched_min is not None else "—"), bg=bg,
+                h_align="center", number_fmt="0.0")
+        # Diff Mins — short / long / on-time tint (same thresholds as before)
         if diff_min is not None:
             if diff_min <= -INSTR_SHORT_MIN:
-                dcol, dbg = AR.C_RED_DARK, AR.C_RED_LITE
+                dlev = "high"
             elif diff_min >= INSTR_SHORT_MIN:
-                dcol, dbg = AR.C_AMBER_DARK, AR.C_AMBER
+                dlev = "medium"
             else:
-                dcol, dbg = AR.C_GREEN_DARK, AR.C_GREEN_PALE
-            dc.fill = AR._fill(dbg); dc.font = AR._font(bold=True, size=10, color=dcol)
-            dc.alignment = AR._align("center", "center"); dc.border = AR._border()
-
-        fgc = ws.cell(row=row_num, column=_IC["Feedback Given"])
-        fgc.value = "Yes" if fb_given else "No"
-        fgc.fill = AR._fill(AR.C_GREEN if fb_given else AR.C_RED_LITE)
-        fgc.font = AR._font(bold=True, size=10, color=AR.C_GREEN_DARK if fb_given else AR.C_RED_DARK)
-        fgc.alignment = AR._align("center", "center"); fgc.border = AR._border()
-
-        wc = ws.cell(row=row_num, column=_IC["Why Flagged"])
-        _rt = _why_flagged_richtext(reasons)
-        wc.value = _rt
-        wc.fill = AR._fill(AR.C_AMBER_PALE)
-        # rich text carries its own per-run colours; the base font only matters
-        # for the plain-text fallback (kept red so key info still stands out).
-        wc.font = AR._font(size=10, color=AR.C_RED_DARK if isinstance(_rt, str) else "333333")
-        wc.alignment = AR._align("left", "center", wrap=True); wc.border = AR._border()
-
-        ws.row_dimensions[row_num].height = max(30, 15 * len(reasons) + 8)
+                dlev = "ok"
+            ds_pill(ws, row_num, _IC["Diff Mins"], f"{diff_min:+.0f}", dlev)
+        else:
+            ds_cell(ws, row_num, _IC["Diff Mins"], "—", bg=bg, h_align="center")
+        for hname, val in (("Total Enrolled", total_enrolled), ("Att. N/A Count", na_cnt),
+                           ("Present", n_present), ("Absent", absent_n)):
+            ds_cell(ws, row_num, _IC[hname], val, bg=bg, h_align="center")
+        ds_cell(ws, row_num, _IC["Att %"], att_pct, bg=ds_att_bg(att_pct, ""),
+                h_align="center", number_fmt='0.0"%"')
+        ds_cell(ws, row_num, _IC["Avg Time in Session %"], avg_time,
+                bg=ds_att_bg(avg_time, ""), h_align="center", number_fmt='0.0"%"')
+        ds_cell(ws, row_num, _IC["No. of Feedbacks"], n_fb, bg=bg, h_align="center")
+        ds_pill(ws, row_num, _IC["Feedback Rate %"], fb_rt,
+                ("ok" if fb_rt >= 50 else "medium" if fb_rt > 0 else "high"),
+                bold=False, number_fmt='0.0"%"')
+        if avg_r is not None:
+            ds_cell(ws, row_num, _IC["⭐ Avg Rating(/10)"], avg_r, bg=ds_rating_bg(avg_r),
+                    h_align="center", number_fmt='0.0')
+        else:
+            ds_cell(ws, row_num, _IC["⭐ Avg Rating(/10)"], "—", bg=bg, h_align="center")
+        ds_cell(ws, row_num, _IC["Min Rating"], (min_r if min_r is not None else "—"),
+                bg=bg, h_align="center")
+        ds_cell(ws, row_num, _IC["Max Rating"], (max_r if max_r is not None else "—"),
+                bg=bg, h_align="center")
+        ds_pill(ws, row_num, _IC["Feedback Given"], "Yes" if fb_given else "No",
+                "ok" if fb_given else "high")
+        ds_why_text(ws, row_num, _IC["Why Flagged"], reasons, col_width=70)
+        ds_followup_cells(ws, row_num, _IC["Action Taken"])
         any_rendered = True
+        n_rows += 1
         row_num += 1
 
     if not any_rendered:
-        AR.write_section_banner(ws, row_num, IN,
-                                "  ✅  No instructor follow-ups required for this period.",
-                                AR.C_GREEN_DARK, h_align="center")
+        ds_empty(ws, row_num, IN, "✅  No instructor follow-ups required for this period.")
         row_num += 1
+    ds_guide_count(ws, "Sessions needing follow-up", n_rows)
     _finish_instr(ws, row_num)
     return ws
 
@@ -989,15 +1487,22 @@ def build_assignment_followups(ws, by_tech, report_date, period_label=None):
     Learner Attendance Follow-Ups tab); each Technology shows the relevant
     Assignment Details header, then every pending-submission learner with an
     action-oriented Why Flagged. All defaulter identification/data is reused from
-    pyAssignmentSubmissionEmailReminder."""
-    title = (f"IntelliBI  |  Batch Coordinator — Learner Assignment Follow-Ups  |  "
-             f"{period_label or report_date.strftime('%d-%b-%Y')}")
-    AR.style_title_row(ws, 1, 1, AFN, title)
-    ws.cell(row=1, column=1).alignment = AR._align("center", "center")
-    AR.write_header_row(ws, 2, AF_COLS)
-    row_num = 3
+    pyAssignmentSubmissionEmailReminder.
+    Presentation: technology = section banner, assignment details = pale
+    sub-banner, '#' cell = priority chip (Missed / Final = High, 2nd = Medium,
+    1st = Info), Reminder stage as a chip, neutral zebra rows."""
+    period = period_label or report_date.strftime('%d-%b-%Y')
+    ds_title(ws, AFN, "Learner Assignment Follow-Ups", period,
+             "Learners with a pending assignment submission, grouped by technology and assignment. "
+             "Priority chip on '#': High = deadline missed / final day, Medium = 2nd reminder, "
+             "Info = 1st reminder.   Colour key: ■ High = red  ■ Medium = amber  ■ Info = blue."
+             + DS_GUIDE_FOLLOWUP)
+    HDR_ROW = 3
+    row_num = ds_headers(ws, HDR_ROW, AF_COLS)
+    ds_followup_headers(ws, HDR_ROW, _AF["Action Taken"])
 
     any_rendered = False
+    n_rows = 0
     try:
         import pyAssignmentSubmissionEmailReminder as ASG
         _lp = ASG.LEVEL_PRIORITY
@@ -1006,10 +1511,9 @@ def build_assignment_followups(ws, by_tech, report_date, period_label=None):
 
     for cn in sorted((by_tech or {}).keys(), key=lambda x: str(x).lower()):
         assignments = by_tech[cn]
-        # technology banner (same blue as the attendance tab's tech banner)
-        _assign_banner(ws, row_num, AFN, f"  {cn or '(Unknown Technology)'}",
-                       AR.C_BLUE_MID, h_align="center")
-        row_num += 1
+        n_tech = sum(len(rows) for _t, _a, rows in assignments if rows)
+        row_num = ds_section(ws, row_num, AFN,
+                             f"{cn or '(Unknown Technology)'}   ·   {n_tech} pending", level=1)
 
         for title_txt, aid, rows in sorted(assignments, key=lambda t: str(t[0]).lower()):
             if not rows:
@@ -1017,14 +1521,13 @@ def build_assignment_followups(ws, by_tech, report_date, period_label=None):
             r0 = rows[0]
             # Assignment Details header (reuses the same meta shown in the PDF)
             _assigned = r0.get("assigned_date_str", "") or "—"
-            details = (f"  📝  {title_txt or '(Untitled Assignment)'}"
+            details = (f"📝  {title_txt or '(Untitled Assignment)'}"
                        f"      •  Duration: {r0.get('class_subject','') or '—'}"
                        f"      •  Max Marks: {r0.get('maximum_marks','') or '—'}"
                        f"      •  Assigned: {_assigned}"
                        f"      •  Deadline: {r0.get('deadline_str','') or '—'}"
                        f"      •  Pending: {len(rows)}")
-            _assign_banner(ws, row_num, AFN, details, AR.C_TEAL, h_align="left")
-            row_num += 1
+            row_num = ds_section(ws, row_num, AFN, details, level=2)
 
             # learners, most-urgent reminder first (same sort as the PDF)
             rows_sorted = sorted(
@@ -1032,46 +1535,33 @@ def build_assignment_followups(ws, by_tech, report_date, period_label=None):
                                      str(r.get("student_name", "")).lower()))
             for i, r in enumerate(rows_sorted, 1):
                 lvl = str(r.get("reminder_level", ""))
-                row_bg = (AR.C_RED_LITE if lvl in ("final", "missed")
-                          else AR.C_AMBER if lvl == "2nd" else AR.C_WHITE)
-                AR.style_data_cell(ws, row_num, _AF["#"], i, bg=row_bg, h_align="center")
-                AR.style_data_cell(ws, row_num, _AF["Student Name"],
-                                   r.get("student_name", "") or "—", bg=row_bg, h_align="left")
-                AR.style_data_cell(ws, row_num, _AF["Email"],
-                                   r.get("student_email", "") or "—", bg=row_bg, h_align="left")
-                AR.style_data_cell(ws, row_num, _AF["Phone"],
-                                   r.get("student_phone", "") or "—", bg=row_bg, h_align="center")
-                AR.style_data_cell(ws, row_num, _AF["Deadline"],
-                                   r.get("deadline_str", "") or "—", bg=row_bg, h_align="center")
-                rc = ws.cell(row=row_num, column=_AF["Reminder"])
-                rc.value = r.get("reminder_label", "") or "—"
-                _rcol = (AR.C_RED_DARK if lvl in ("final", "missed")
-                         else AR.C_AMBER_DARK if lvl == "2nd" else AR.C_GREEN_DARK)
-                rc.font = AR._font(bold=True, size=10, color=_rcol)
-                rc.fill = AR._fill(row_bg); rc.alignment = AR._align("center", "center")
-                rc.border = AR._border()
-                wc = ws.cell(row=row_num, column=_AF["Why Flagged"])
-                _rt = _why_flagged_richtext(_assignment_why_runs(r))
-                wc.value = _rt
-                wc.fill = AR._fill(AR.C_AMBER_PALE)
-                wc.font = AR._font(size=10, color=AR.C_RED_DARK if isinstance(_rt, str) else "333333")
-                wc.alignment = AR._align("left", "center", wrap=True); wc.border = AR._border()
-                ws.row_dimensions[row_num].height = 28
+                level = ("high" if lvl in ("final", "missed") else "medium" if lvl == "2nd" else "info")
+                bg = ds_zebra(i)
+                ds_priority(ws, row_num, _AF["#"], i, level)
+                ds_cell(ws, row_num, _AF["Student Name"], r.get("student_name", "") or "—",
+                        bg=bg, bold=True)
+                ds_cell(ws, row_num, _AF["Email"], r.get("student_email", "") or "—", bg=bg)
+                ds_cell(ws, row_num, _AF["Phone"], r.get("student_phone", "") or "—", bg=bg,
+                        h_align="center")
+                ds_cell(ws, row_num, _AF["Deadline"], r.get("deadline_str", "") or "—", bg=bg,
+                        h_align="center", bold=(level == "high"),
+                        fg=(AR.C_RED_DARK if level == "high" else DS_TEXT))
+                ds_pill(ws, row_num, _AF["Reminder"], r.get("reminder_label", "") or "—", level)
+                ds_why_text(ws, row_num, _AF["Why Flagged"], _assignment_why_runs(r), col_width=64)
+                ds_followup_cells(ws, row_num, _AF["Action Taken"])
                 any_rendered = True
+                n_rows += 1
                 row_num += 1
 
     if not any_rendered:
-        AR.write_section_banner(ws, row_num, AFN,
-                                "  ✅  No assignment submission follow-ups for this day.",
-                                AR.C_GREEN_DARK, h_align="center")
+        ds_empty(ws, row_num, AFN, "✅  No assignment submission follow-ups for this day.")
         row_num += 1
+    ds_guide_count(ws, "Pending submissions", n_rows)
 
-    from openpyxl.utils import get_column_letter
-    ws.auto_filter.ref = f"A2:{get_column_letter(AFN)}{max(row_num - 1, 2)}"
-    ws.freeze_panes = "A3"
-    AR.auto_col_width(ws)
-    ws.column_dimensions[get_column_letter(_AF["Why Flagged"])].width = 60
-    ws.column_dimensions[get_column_letter(_AF["Email"])].width = 30
+    ds_finish(ws, HDR_ROW, AFN, widths={
+        "#": 6, "Student Name": 24, "Email": 32, "Phone": 16, "Deadline": 13, "Reminder": 16,
+    }, why_col=_AF["Why Flagged"], why_width=64, default_width=14, tab_color=DS_SECTION,
+       followup=(_AF["Action Taken"], FOLLOWUP_ACTIONS["assignment"]))
     return ws
 
 
@@ -1194,64 +1684,66 @@ def build_admission_formalities(ws, rows, report_date, period_label=None):
     """Learner Admission Formalities tab. Lists learners with PENDING admission
     formalities (identification, status and every value reused as-is from
     pyAdmissionFormalitiesReport), plus one action-oriented 'Why Flagged' column
-    immediately after 'Expiry Date'. Important status, dates/expiry and the
-    required action are highlighted red, matching the other follow-up tabs."""
-    title = (f"IntelliBI  |  Batch Coordinator — Learner Admission Formalities  |  "
-             f"{period_label or report_date.strftime('%d-%b-%Y')}")
-    AR.style_title_row(ws, 1, 1, ADMN, title)
-    ws.cell(row=1, column=1).alignment = AR._align("center", "center")
-    AR.write_header_row(ws, 2, ADM_COLS)
-    row_num = 3
+    immediately after 'Expiry Date'.
+    Presentation: Student Name = priority chip (red = not sent / expired /
+    declined, amber = sent but unopened, blue = other pending — the reference
+    report's own classification), Recipient Status as a chip, expiry date bold red
+    when live, neutral zebra rows, numbered Why Flagged with the action line."""
+    period = period_label or report_date.strftime('%d-%b-%Y')
+    ds_title(ws, ADMN, "Learner Admission Formalities", period,
+             "Learners whose admission form / e-signature is still pending, most urgent first. "
+             "Priority chip on Student Name: High = form not sent, expired or declined; "
+             "Medium = sent but not opened; Info = other pending.   "
+             "Colour key: ■ High = red  ■ Medium = amber  ■ Info = blue." + DS_GUIDE_FOLLOWUP)
+    HDR_ROW = 3
+    row_num = ds_headers(ws, HDR_ROW, ADM_COLS)
+    ds_followup_headers(ws, HDR_ROW, _ADMC["Action Taken"])
 
     _text_cols = {"Student Name", "Email ID", "Batch Name", "Request Form Name",
                   "Recipient Status", "Request Status"}
     any_rendered = False
+    n_rows = 0
     # most-urgent first (red → amber → rest); stable, so newest-joined order stays
     ordered = sorted(rows or [], key=_adm_severity_key)
     for r in ordered:
         rs = r.get("Recipient Status", "")
         qs = r.get("Request Status", "")
-        bg = _adm_bg(rs, qs)
+        bg_ref = _adm_bg(rs, qs)                 # reference classification (unchanged)
+        level = ("high" if bg_ref == AR.C_RED_LITE else "medium" if bg_ref == AR.C_AMBER
+                 else "ok" if bg_ref in (AR.C_GREEN, AR.C_GREEN_PALE) else "info")
+        bg = ds_zebra(n_rows)
         for c in _ADM_BASE_COLS:
             val = r.get(c, "")
-            AR.style_data_cell(ws, row_num, _ADMC[c],
-                               (val if str(val).strip() else "—"),
-                               bg=bg, h_align="left" if c in _text_cols else "center")
-        # Recipient Status — highlight the key status (bold, status-coloured).
-        sc = ws.cell(row=row_num, column=_ADMC["Recipient Status"])
-        _scol = (AR.C_RED_DARK if bg == AR.C_RED_LITE
-                 else AR.C_AMBER_DARK if bg == AR.C_AMBER
-                 else AR.C_GREEN_DARK if bg in (AR.C_GREEN, AR.C_GREEN_PALE)
-                 else "333333")
-        sc.font = AR._font(bold=True, size=10, color=_scol)
+            ds_cell(ws, row_num, _ADMC[c], (val if str(val).strip() else "—"), bg=bg,
+                    h_align="left" if c in _text_cols else "center")
+        # Student Name — the priority chip (who is affected + how urgent)
+        ds_priority(ws, row_num, _ADMC["Student Name"],
+                    (r.get("Student Name", "") if str(r.get("Student Name", "")).strip() else "—"),
+                    level, h_align="left")
+        # Recipient Status — highlight the key status as a chip.
+        ds_pill(ws, row_num, _ADMC["Recipient Status"],
+                (rs if str(rs).strip() else "—"), level, h_align="left")
         # Expiry Date — a live deadline; flag red when present on an attention row.
-        if str(r.get("Expiry Date", "") or "").strip() and bg in (AR.C_RED_LITE, AR.C_AMBER):
-            ec = ws.cell(row=row_num, column=_ADMC["Expiry Date"])
-            ec.font = AR._font(bold=True, size=10, color=AR.C_RED_DARK)
-        # Why Flagged — action-oriented, red-highlighted rich text.
-        wc = ws.cell(row=row_num, column=_ADMC["Why Flagged"])
-        _rt = _why_flagged_richtext(_admission_why_runs(r))
-        wc.value = _rt
-        wc.fill = AR._fill(AR.C_AMBER_PALE)
-        wc.font = AR._font(size=10, color=AR.C_RED_DARK if isinstance(_rt, str) else "333333")
-        wc.alignment = AR._align("left", "center", wrap=True); wc.border = AR._border()
-        ws.row_dimensions[row_num].height = 30
+        if str(r.get("Expiry Date", "") or "").strip() and level in ("high", "medium"):
+            ds_cell(ws, row_num, _ADMC["Expiry Date"], r.get("Expiry Date", ""), bg=bg,
+                    h_align="center", bold=True, fg=AR.C_RED_DARK)
+        ds_why_text(ws, row_num, _ADMC["Why Flagged"], _admission_why_runs(r), col_width=66)
+        ds_followup_cells(ws, row_num, _ADMC["Action Taken"])
         any_rendered = True
+        n_rows += 1
         row_num += 1
 
     if not any_rendered:
-        AR.write_section_banner(ws, row_num, ADMN,
-                                "  ✅  No pending admission formalities for this day.",
-                                AR.C_GREEN_DARK, h_align="center")
+        ds_empty(ws, row_num, ADMN, "✅  No pending admission formalities for this day.")
         row_num += 1
+    ds_guide_count(ws, "Learners with pending formalities", n_rows)
 
-    from openpyxl.utils import get_column_letter
-    ws.auto_filter.ref = f"A2:{get_column_letter(ADMN)}{max(row_num - 1, 2)}"
-    ws.freeze_panes = "A3"
-    AR.auto_col_width(ws)
-    ws.column_dimensions[get_column_letter(_ADMC["Why Flagged"])].width = 64
-    ws.column_dimensions[get_column_letter(_ADMC["Email ID"])].width = 30
-    ws.column_dimensions[get_column_letter(_ADMC["Recipient Status"])].width = 20
+    ds_finish(ws, HDR_ROW, ADMN, widths={
+        "Student Name": 24, "Email ID": 30, "Phone Number": 16, "Batch Name": 14,
+        "Joined On": 12, "Request Form Name": 30, "Recipient Status": 20,
+        "Request Status": 30, "Sent Date": 20, "Signed Date": 20, "Expiry Date": 20,
+    }, why_col=_ADMC["Why Flagged"], why_width=66, default_width=14, tab_color=DS_SECTION,
+       followup=(_ADMC["Action Taken"], FOLLOWUP_ACTIONS["admission"]))
     return ws
 
 
@@ -1436,43 +1928,71 @@ def _wise_instructor_display(records):
 
 def _wise_render_section(ws, start_row, ncols_max, banner_text, data_headers,
                          display_rows, text_col_idxs):
-    """Render one validation section: a full-width separator banner, a header row
-    (with 'Why Flagged' pinned to the last column so it aligns across sections),
-    then the failed records. Returns the next free row (with a trailing blank)."""
+    """Render one validation section: a section banner, a header row (the data
+    headers, then 'Why Flagged' spanning every remaining column so it is wide and
+    aligned across sections), then the failed records — first cell = priority
+    chip (Invalid = High, Missing = Medium, Warning = Info), Valid / Missing /
+    Invalid statuses as chips, neutral zebra rows. Returns the next free row
+    (with a trailing blank)."""
     r = start_row
-    _assign_banner(ws, r, ncols_max, banner_text, AR.C_BLUE_MID, h_align="center")
-    r += 1
+    total_cols = ncols_max + len(FOLLOWUP_COLS)           # why span + follow-up block
+    fu_c0 = ncols_max + 1
+    r = ds_section(ws, r, total_cols, banner_text, level=1)
     ndata = len(data_headers)
-    full_hdr = list(data_headers) + [""] * (ncols_max - 1 - ndata) + ["Why Flagged"]
-    AR.write_header_row(ws, r, full_hdr)
+    why_c0 = ndata + 1
+    # header row: data headers + one merged "Why Flagged" header
+    for col, h in enumerate(data_headers, 1):
+        c = ws.cell(row=r, column=col)
+        c.value = h
+        c.font = AR._font(bold=True, size=9, color=AR.C_WHITE)
+        c.fill = AR._fill(DS_NAV2)
+        c.alignment = AR._align("center", "center", wrap=True)
+        c.border = ds_border()
+    if ncols_max > why_c0:
+        ws.merge_cells(start_row=r, start_column=why_c0, end_row=r, end_column=ncols_max)
+    for col in range(why_c0, ncols_max + 1):
+        c = ws.cell(row=r, column=col)
+        c.fill = AR._fill(DS_NAV2); c.border = ds_border()
+    wc = ws.cell(row=r, column=why_c0)
+    wc.value = "Why Flagged"
+    wc.font = AR._font(bold=True, size=9, color=AR.C_WHITE)
+    wc.alignment = AR._align("center", "center", wrap=True)
+    ds_followup_headers(ws, r, fu_c0)
+    ws.row_dimensions[r].height = 28
     r += 1
     if not display_rows:
-        AR.write_section_banner(ws, r, ncols_max,
-                                "  ✅  No attention-required records in this section.",
-                                AR.C_GREEN_DARK, h_align="center")
-        return r + 2
-    for dr in display_rows:
-        bg = _wise_sev_bg(dr["severity"])
+        r = ds_empty(ws, r, total_cols, "✅  No attention-required records in this section.")
+        return r + 1
+    # width available to the merged Why-Flagged cell (for the row-height estimate)
+    why_width = sum((ws.column_dimensions[_gcl(c)].width or 14) for c in range(why_c0, ncols_max + 1))
+    for i, dr in enumerate(display_rows):
+        sev = dr["severity"]
+        level = {3: "high", 2: "medium", 1: "info"}.get(sev, "info")
+        bg = ds_zebra(i)
         cells = dr["cells"]
         for ci in range(ndata):
             st = dr["status_cells"].get(ci)
             if st is not None:
-                sbg, sfg = _wise_status_style(st)
-                AR.style_data_cell(ws, r, ci + 1, st or "—", bg=sbg, h_align="center")
-                ws.cell(row=r, column=ci + 1).font = AR._font(bold=True, size=10, color=sfg)
+                s = str(st or "").strip()
+                lev = {"Invalid": "high", "Missing": "medium", "Warning": "info",
+                       "Valid": "ok"}.get(s, "none")
+                ds_pill(ws, r, ci + 1, s or "—", lev)
             else:
                 val = cells[ci] if ci < len(cells) else ""
-                AR.style_data_cell(ws, r, ci + 1, (val if str(val).strip() != "" else "—"),
-                                   bg=bg, h_align="left" if ci in text_col_idxs else "center")
-        for ci in range(ndata, ncols_max - 1):        # gap cells → keep the row band
-            AR.style_data_cell(ws, r, ci + 1, "", bg=bg, h_align="center")
-        wc = ws.cell(row=r, column=ncols_max)
-        _rt = _why_flagged_richtext(dr["why_reasons"])
-        wc.value = _rt
-        wc.fill = AR._fill(AR.C_AMBER_PALE)
-        wc.font = AR._font(size=10, color=AR.C_RED_DARK if isinstance(_rt, str) else "333333")
-        wc.alignment = AR._align("left", "center", wrap=True); wc.border = AR._border()
-        ws.row_dimensions[r].height = max(30, 15 * len(dr["why_reasons"]) + 8)
+                ds_cell(ws, r, ci + 1, (val if str(val).strip() != "" else "—"), bg=bg,
+                        h_align="left" if ci in text_col_idxs else "center", wrap=True,
+                        bold=(ci in text_col_idxs and ci == min(text_col_idxs, default=-1)))
+        # first cell = priority chip
+        first_val = ws.cell(row=r, column=1).value
+        ds_priority(ws, r, 1, first_val, level,
+                    h_align="left" if 0 in text_col_idxs else "center")
+        if ncols_max > why_c0:
+            ws.merge_cells(start_row=r, start_column=why_c0, end_row=r, end_column=ncols_max)
+            for col in range(why_c0 + 1, ncols_max + 1):
+                ws.cell(row=r, column=col).border = ds_border()
+                ws.cell(row=r, column=col).fill = AR._fill(DS_WHY)
+        ds_why_text(ws, r, why_c0, dr["why_reasons"], col_width=why_width)
+        ds_followup_cells(ws, r, fu_c0)
         r += 1
     return r + 1
 
@@ -1481,32 +2001,41 @@ def build_wise_validation(ws, data, report_date, period_label=None, interview_ro
     """Wise & Interview Feedback Validation tab — combines pyWiseDataValidationReport's
     Student, Course and Instructor validation FAILURES, PLUS an 'Interview Feedback Not
     Completed' section, into one coordinator tab. Each section is separated by a header
-    banner and ends in an action-oriented, red-highlighted 'Why Flagged' column. The
-    existing Wise validation logic is reused unchanged; the interview-feedback section
-    is purely additive."""
-    from openpyxl.utils import get_column_letter
+    banner and ends in an action-oriented 'Why Flagged' column. The existing Wise
+    validation logic is reused unchanged; the interview-feedback section is purely
+    additive. Presentation follows the common report design system."""
     NMAX = 11
     # Interview Feedback Not Completed — appended as the LAST section of this tab.
-    IFV_DATA = ["Interview Start Date", "Interviewer Name", "Tech Stack",
+    IFV_DATA = ["#", "Interview Start Date", "Interviewer Name", "Tech Stack",
                 "Batch Name", "Batch Title / Duration"]
-    IFV_BANNER = ("  INTERVIEW FEEDBACK NOT COMPLETED  —  Feedback Missing in the "
+    # the interview rows carry [date, interviewer, tech, batch, title]; number them
+    # like every other section so the '#' priority chip lines up (display only)
+    ifv_rows = [dict(r, cells=[i] + list(r.get("cells", [])))
+                for i, r in enumerate(interview_rows or [], 1)]
+    IFV_BANNER = ("INTERVIEW FEEDBACK NOT COMPLETED  —  Feedback missing in the "
                   "Interview Consolidate Sheet")
-    title = (f"IntelliBI  |  Batch Coordinator — Wise & Interview Feedback Validation  |  "
-             f"{period_label or report_date.strftime('%d-%b-%Y')}")
-    AR.style_title_row(ws, 1, 1, NMAX, title)
-    ws.cell(row=1, column=1).alignment = AR._align("center", "center")
-    row = 2
+    period = period_label or report_date.strftime('%d-%b-%Y')
+    NTOT = NMAX + len(FOLLOWUP_COLS)
+    ds_title(ws, NTOT, "Wise & Interview Feedback Validation", period,
+             "Data-quality checks in Wise (student / course / instructor records) plus interviews "
+             "without feedback. Priority chip on the first cell: High = Invalid value, "
+             "Medium = Missing value, Info = Warning.   Colour key: ■ High = red  ■ Medium = amber  "
+             "■ Info = blue  ■ Valid = green." + DS_GUIDE_FOLLOWUP)
+    # column widths first — the merged Why-Flagged width drives the row heights
+    _widths = [6, 26, 24, 18, 12, 12, 12, 20, 10, 24, 40] + [FOLLOWUP_WIDTHS[h] for h in FOLLOWUP_COLS]
+    for i, w in enumerate(_widths, 1):
+        ws.column_dimensions[_gcl(i)].width = w
+    row = 3
 
     if not data:
-        AR.write_section_banner(ws, row, NMAX,
-                                "  Wise validation data is unavailable for this run.",
-                                AR.C_GREY_BD, h_align="center")
+        row = ds_empty(ws, row, NTOT, "Wise validation data is unavailable for this run.",
+                       level="muted")
         # Still show the Interview Feedback validation section (independent of Wise data).
-        _wise_render_section(ws, row + 2, NMAX, IFV_BANNER, IFV_DATA,
-                             interview_rows or [], {1, 2, 3, 4})
-        ws.freeze_panes = "A2"
-        AR.auto_col_width(ws)
-        ws.column_dimensions[get_column_letter(NMAX)].width = 72
+        _wise_render_section(ws, row + 1, NMAX, IFV_BANNER, IFV_DATA, ifv_rows, {2, 3, 4, 5})
+        ds_followup_apply(ws, NMAX + 1, FOLLOWUP_ACTIONS["wise"])
+        ws.freeze_panes = "A3"
+        ws.sheet_view.showGridLines = False
+        ws.sheet_properties.tabColor = DS_SECTION
         return ws
 
     STU_DATA = ["#", "Student Name", "Batch Name", "Name", "Email", "Phone",
@@ -1515,22 +2044,35 @@ def build_wise_validation(ws, data, report_date, period_label=None, interview_ro
                 "Title", "Subtitle", "Tag", "Created On"]
     INS_DATA = ["#", "Instructor ID", "Instructor Name", "Failed Checks"]
 
+    n_total = sum(len(v or []) for v in (data.get("student"), data.get("course"),
+                                          data.get("instructor"))) + len(interview_rows or [])
     row = _wise_render_section(
-        ws, row, NMAX, "  STUDENT VALIDATION  —  Failed / Attention-Required Records",
+        ws, row, NMAX, "STUDENT VALIDATION  —  Failed / Attention-Required Records",
         STU_DATA, _wise_student_display(data.get("student", [])), {1, 2})
     row = _wise_render_section(
-        ws, row, NMAX, "  COURSE VALIDATION  —  Failed / Attention-Required Records",
+        ws, row, NMAX, "COURSE VALIDATION  —  Failed / Attention-Required Records",
         CRS_DATA, _wise_course_display(data.get("course", [])), {1, 2, 3})
     row = _wise_render_section(
-        ws, row, NMAX, "  INSTRUCTOR VALIDATION  —  Failed / Attention-Required Records",
+        ws, row, NMAX, "INSTRUCTOR VALIDATION  —  Failed / Attention-Required Records",
         INS_DATA, _wise_instructor_display(data.get("instructor", [])), {2})
     # NEW — Interview Feedback Not Completed (last section, additive).
     row = _wise_render_section(
-        ws, row, NMAX, IFV_BANNER, IFV_DATA, interview_rows or [], {1, 2, 3, 4})
+        ws, row, NMAX, IFV_BANNER, IFV_DATA, ifv_rows, {2, 3, 4, 5})
+    ds_guide_count(ws, "Records needing attention", n_total)
+    ds_followup_apply(ws, NMAX + 1, FOLLOWUP_ACTIONS["wise"])
 
-    ws.freeze_panes = "A2"
-    AR.auto_col_width(ws)
-    ws.column_dimensions[get_column_letter(NMAX)].width = 72     # Why Flagged
+    ds_fit_guide(ws, NTOT)
+    ws.freeze_panes = "A3"
+    ws.sheet_view.showGridLines = False
+    ws.sheet_view.zoomScale = 90
+    ws.sheet_properties.tabColor = DS_SECTION
+    try:
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+    except Exception:
+        pass
     return ws
 
 
@@ -1539,33 +2081,27 @@ def build_student_detail_ext(ws, att_daily: pd.DataFrame, susp_daily: pd.DataFra
                              yest_date=None, period_label=None):
     """Extended daily Student Detail written into the provided worksheet `ws`.
     Mirrors pyAttendaceFeedbackReport's daily Student Detail (identity + daily
-    columns, identical logic/styling) and appends the Overall / Till-Date
-    Aggregate block."""
-    title = (f"IntelliBI  |  Batch Coordinator — Learner Attendance Follow-Ups  |  "
-             f"{period_label or report_date.strftime('%d-%b-%Y')}")
-    AR.style_title_row(ws, 1, 1, N, title)
-    ws.cell(row=1, column=1).alignment = AR._align("center", "center")
-
-    # ── row 2: section super-headers ─────────────────────────────────────────
-    def _superhead(c_start, c_end, text, bg):
-        ws.merge_cells(start_row=2, start_column=c_start, end_row=2, end_column=c_end)
-        c = ws.cell(row=2, column=c_start)
-        c.value = text
-        c.font = AR._font(bold=True, size=10, color=AR.C_WHITE)
-        c.fill = AR._fill(bg)
-        c.alignment = AR._align("center", "center")
-        c.border = AR._border()
-    _superhead(1, 1, "Rank", AR.C_NAV2)
-    _superhead(2, len(STUDENT_COLS), "Student", AR.C_NAV2)
-    _superhead(len(STUDENT_COLS) + 1, len(STUDENT_COLS) + len(DAILY_COLS),
-               f"Daily — {report_date.strftime('%d-%b-%Y')}", AR.C_BLUE_MID)
-    _superhead(_AGG_START, N, "Overall / Till-Date Aggregate", AR.C_TEAL)
-    ws.row_dimensions[2].height = 20
-
-    # ── row 3: column headers ────────────────────────────────────────────────
-    AR.write_header_row(ws, 3, HEADERS)
-
-    row_num = 4
+    columns, identical logic) and appends the Overall / Till-Date Aggregate block.
+    Presentation: common report design system — grouped headers (Student / Daily /
+    Overall), the Rank cell as the priority chip, neutral zebra rows, semantic
+    tints only on status & measure cells, and a numbered Why Flagged with the
+    action on its own line."""
+    period = period_label or report_date.strftime('%d-%b-%Y')
+    ds_title(ws, N, "Learner Attendance Follow-Ups", period,
+             "One row per learner who needs a follow-up today, grouped by technology; Rank 1 = "
+             "most urgent within the technology (chip: High = rank 1–3, Medium = 4–6, Info = others). "
+             "Peach rows = yesterday's session.   Colour key: ■ High = red  ■ Medium = amber  "
+             "■ Info = blue  ■ OK = green." + DS_GUIDE_FOLLOWUP)
+    groups = [(1, 1, ""),
+              (2, len(STUDENT_COLS), "STUDENT"),
+              (len(STUDENT_COLS) + 1, len(STUDENT_COLS) + len(DAILY_COLS),
+               f"DAILY — {report_date.strftime('%d-%b-%Y')}"),
+              (_AGG_START, _C["Why Flagged"] - 1, "OVERALL / TILL-DATE AGGREGATE"),
+              (_C["Why Flagged"], _C["Why Flagged"], "ACTION"),
+              (_C["Action Taken"], _C["Follow-Up DateTime"], "COORDINATOR FOLLOW-UP (fill in)")]
+    HDR_ROW = 4
+    row_num = ds_headers(ws, 3, HEADERS, groups=groups)
+    ds_followup_headers(ws, HDR_ROW, _C["Action Taken"])
 
     # feedback given pairs (session_id, student_id) for today
     fb_pairs = set()
@@ -1580,74 +2116,49 @@ def build_student_detail_ext(ws, att_daily: pd.DataFrame, susp_daily: pd.DataFra
                 fb_ratings[_k] = _rt
 
     def _agg_cells(row_num, key, row_bg):
-        """Write the 10 aggregate columns for a given (sid, cn, ct)."""
+        """Write the aggregate columns for a given (sid, cn, ct)."""
         a = agg_map.get(key)
         if not a:
-            for col in range(_AGG_START, N + 1):
-                AR.style_data_cell(ws, row_num, col, "—", bg=row_bg, h_align="center")
+            for col in range(_AGG_START, _C["Why Flagged"] + 1):
+                ds_cell(ws, row_num, col, "—", bg=row_bg, h_align="center")
             return
         present, total = a["present"], a["total"]
         agg_att = a["attendance_pct"]
         agg_dur = a["agg_dur_pct"]
         # Sessions (P/T)
-        AR.style_data_cell(ws, row_num, _C["Sessions (P/T)"], f"{present}/{total}",
-                           bg=row_bg, bold=True, h_align="center")
-        # Agg Attendance %
-        c = AR.style_data_cell(ws, row_num, _C["Agg Attendance %"], agg_att,
-                               bg=AR._att_bg(agg_att, ""), h_align="center",
-                               number_fmt='0.0"%"')
-        c.font = AR._font(bold=(agg_att < 75), size=10,
-                          color=AR.C_RED_DARK if agg_att < 75 else AR.C_GREEN_DARK if agg_att >= 95 else "000000")
-        # Agg Duration Att %
-        c = AR.style_data_cell(ws, row_num, _C["Agg Duration Att %"], agg_dur,
-                               bg=AR._att_bg(agg_dur, ""), h_align="center",
-                               number_fmt='0.0"%"')
-        c.font = AR._font(bold=(agg_dur < 75), size=10,
-                          color=AR.C_RED_DARK if agg_dur < 75 else AR.C_GREEN_DARK if agg_dur >= 95 else "000000")
+        ds_cell(ws, row_num, _C["Sessions (P/T)"], f"{present}/{total}", bg=row_bg,
+                bold=True, h_align="center")
+        # Agg Attendance %  /  Agg Duration Att %  (heat tint = meaning)
+        for hname, v in (("Agg Attendance %", agg_att), ("Agg Duration Att %", agg_dur)):
+            ds_cell(ws, row_num, _C[hname], v, bg=ds_att_bg(v, ""), h_align="center",
+                    number_fmt='0.0"%"', bold=(v < 75),
+                    fg=(AR.C_RED_DARK if v < 75 else AR.C_GREEN_DARK if v >= 95 else DS_TEXT))
         # Last Present
         lp = a["last_present"].strftime("%d-%b-%Y") if a["last_present"] else "—"
-        AR.style_data_cell(ws, row_num, _C["Last Present"], lp, bg=row_bg, h_align="center")
+        ds_cell(ws, row_num, _C["Last Present"], lp, bg=row_bg, h_align="center")
         # Absent Streak
         streak = a["streak"]
-        if streak >= 3:
-            s_bg, s_col = AR.C_RED_LITE, AR.C_RED_DARK
-        elif streak >= 1:
-            s_bg, s_col = AR.C_AMBER, AR.C_AMBER_DARK
-        else:
-            s_bg, s_col = AR.C_GREEN_PALE, AR.C_GREEN_DARK
-        c = AR.style_data_cell(ws, row_num, _C["Absent Streak"], streak, bg=s_bg, h_align="center")
-        c.font = AR._font(bold=(streak >= 1), size=10, color=s_col)
+        ds_pill(ws, row_num, _C["Absent Streak"], streak,
+                ("high" if streak >= 3 else "medium" if streak >= 1 else "ok"),
+                bold=(streak >= 1))
         # Feedbacks
-        AR.style_data_cell(ws, row_num, _C["Feedbacks"], a["n_feedbacks"], bg=row_bg, h_align="center")
+        ds_cell(ws, row_num, _C["Feedbacks"], a["n_feedbacks"], bg=row_bg, h_align="center")
         # Feedback Part. %
         part = a["participation_pct"]
-        if part >= 50:
-            p_bg, p_col = AR.C_GREEN_PALE, AR.C_GREEN_DARK
-        elif part > 0:
-            p_bg, p_col = AR.C_AMBER, AR.C_AMBER_DARK
-        else:
-            p_bg, p_col = AR.C_RED_LITE, AR.C_RED_DARK
-        c = AR.style_data_cell(ws, row_num, _C["Feedback Part. %"], part, bg=p_bg,
-                               h_align="center", number_fmt='0.0"%"')
-        c.font = AR._font(size=10, color=p_col)
+        ds_pill(ws, row_num, _C["Feedback Part. %"], part,
+                ("ok" if part >= 50 else "medium" if part > 0 else "high"),
+                bold=False, number_fmt='0.0"%"')
         # Avg Rating (/10)
         if a["avg_rating"] is not None:
-            c = AR.style_data_cell(ws, row_num, _C["Avg Rating (/10)"], a["avg_rating"],
-                                   bg=AR._rating_bg(a["avg_rating"]), h_align="center",
-                                   number_fmt='0.0')
+            ds_cell(ws, row_num, _C["Avg Rating (/10)"], a["avg_rating"],
+                    bg=ds_rating_bg(a["avg_rating"]), h_align="center", number_fmt='0.0')
         else:
-            AR.style_data_cell(ws, row_num, _C["Avg Rating (/10)"], "—", bg=row_bg, h_align="center")
+            ds_cell(ws, row_num, _C["Avg Rating (/10)"], "—", bg=row_bg, h_align="center")
         # Overall Remarks (daily _remarks bands, on the aggregate duration %)
         orem = AR._remarks(agg_dur, "")
-        c = AR.style_data_cell(ws, row_num, _C["Overall Remarks"], orem,
-                               bg=AR._att_bg(agg_dur, ""), h_align="left")
-        c.font = AR._font(size=10, color=AR.C_RED_DARK if agg_dur < 75
-                          else AR.C_GREEN_DARK if agg_dur >= 95 else "000000")
-        # Why Flagged
-        why = a.get("why", "") or ""
-        c = AR.style_data_cell(ws, row_num, _C["Why Flagged"], why or "—",
-                               bg=(AR.C_AMBER_PALE if why else row_bg), h_align="left", wrap=True)
-        c.font = AR._font(size=10, color=AR.C_AMBER_DARK if why else "808080")
+        ds_cell(ws, row_num, _C["Overall Remarks"], orem, bg=ds_att_bg(agg_dur, ""),
+                bold=(agg_dur < 75),
+                fg=(AR.C_RED_DARK if agg_dur < 75 else AR.C_GREEN_DARK if agg_dur >= 95 else DS_TEXT))
 
     # global severity ranking (rank 1 = worst) across all follow-up rows
     rank_map = _compute_learner_ranks(att_daily, agg_map, fb_pairs, fb_ratings)
@@ -1659,6 +2170,7 @@ def build_student_detail_ext(ws, att_daily: pd.DataFrame, susp_daily: pd.DataFra
     #   one conversation. Not-applicable and suspended students are never
     #   follow-ups and are omitted from this action list.
     any_rendered = False
+    n_rows = 0
     if att_daily is not None and not att_daily.empty:
         _tmp = att_daily.copy()
         # order each technology's follow-up rows by their (technology-wise) rank,
@@ -1690,115 +2202,82 @@ def build_student_detail_ext(ws, att_daily: pd.DataFrame, susp_daily: pd.DataFra
             if (cn, ct) != banner_group:        # lazy technology banner
                 banner_group = (cn, ct)
                 alt_i = 0
-                banner = f"  {cn}  —  {ct}" if ct else f"  {cn}"
-                AR.write_section_banner(ws, row_num, N, banner, AR.C_BLUE_MID, h_align="center")
-                row_num += 1
+                banner = f"{cn}  —  {ct}" if ct else f"{cn}"
+                row_num = ds_section(ws, row_num, N, banner, level=1)
 
             status = str(r.get("status", ""))
             pct = r.get("_pct_num", 0.0)
-            row_bg = AR._row_bg(pct, status, alt_i)
+            row_bg = ds_zebra(alt_i)
             if yest_date is not None and r.get("_date") == yest_date:
-                row_bg = AR.C_YEST_HL
+                row_bg = "FFF6EA"                # yesterday's session — soft peach
             alt_i += 1
             icon = AR._att_icon(pct, status)
             status_disp = "❌  Absent" if status == "Absent" else "✅  Present"
             att_disp = f"{icon}  Absent" if status == "Absent" else f"{icon}  {pct:.1f}%"
 
-            for col, v in enumerate([r.get("course_name", ""), r.get("course_title", ""),
-                                     r.get("student_name", ""), r.get("phone", "")], 2):
-                AR.style_data_cell(ws, row_num, col, v, bg=row_bg, h_align="left")
-
             # Rank (1 = worst) — reflects combined A/B/C follow-up severity
             _rk = rank_map.get((sid, str(r.get("session_id", "")), str(cn), str(ct)))
-            rkc = ws.cell(row=row_num, column=_C["Rank"])
-            rkc.value = _rk if _rk else "—"
-            if _rk and _rk <= 3:
-                _rk_bg, _rk_col = AR.C_RED_LITE, AR.C_RED_DARK
-            elif _rk and _rk <= 6:
-                _rk_bg, _rk_col = AR.C_AMBER, AR.C_AMBER_DARK
-            else:
-                _rk_bg, _rk_col = row_bg, "000000"
-            rkc.font = AR._font(bold=True, size=11, color=_rk_col)
-            rkc.fill = AR._fill(_rk_bg)
-            rkc.alignment = AR._align("center", "center"); rkc.border = AR._border()
+            level = ("high" if (_rk and _rk <= 3) else "medium" if (_rk and _rk <= 6) else "info")
+            ds_priority(ws, row_num, _C["Rank"], _rk if _rk else "—", level)
 
-            sc = ws.cell(row=row_num, column=_C["Status"])
-            sc.value = status_disp
-            sc.font = AR._font(bold=True, size=10,
-                               color=AR.C_RED_DARK if status == "Absent" else AR.C_GREEN_DARK)
-            sc.fill = AR._fill(AR.C_RED_LITE if status == "Absent" else AR.C_GREEN)
-            sc.alignment = AR._align("center", "center"); sc.border = AR._border()
+            for col, v in enumerate([r.get("course_name", ""), r.get("course_title", ""),
+                                     r.get("student_name", ""), r.get("phone", "")], 2):
+                ds_cell(ws, row_num, col, v, bg=row_bg, bold=(col == _C["Student Name"]))
 
-            ac = ws.cell(row=row_num, column=_C["Attendance %"])
-            ac.value = att_disp
-            ac.font = AR._font(bold=(status == "Absent" or pct < 75), size=10,
-                               color=AR.C_RED_DARK if (status == "Absent" or pct < 75) else AR.C_GREEN_DARK)
-            ac.fill = AR._fill(AR._att_bg(pct, status))
-            ac.alignment = AR._align("center", "center"); ac.border = AR._border()
-
-            AR.style_data_cell(ws, row_num, _C["Duration (min)"],
-                               r.get("_dur_min", 0) if r.get("_dur_min", 0) > 0 else "",
-                               bg=row_bg, h_align="center")
-            AR.style_data_cell(ws, row_num, _C["Joined At"],
-                               str(r.get("first_join_ist", ""))[:19], bg=row_bg, h_align="center")
-            AR.style_data_cell(ws, row_num, _C["Left At"],
-                               str(r.get("last_leave_ist", ""))[:19], bg=row_bg, h_align="center")
-
-            rc = ws.cell(row=row_num, column=_C["Remarks"])
-            rc.value = AR._remarks(pct, status)
-            rc.font = AR._font(size=10, color=AR.C_RED_DARK if (status == "Absent" or pct < 75)
-                               else AR.C_GREEN_DARK if pct >= 95 else "000000")
-            rc.fill = AR._fill(row_bg); rc.alignment = AR._align("left", "center"); rc.border = AR._border()
+            ds_pill(ws, row_num, _C["Status"], status_disp,
+                    "high" if status == "Absent" else "ok")
+            ds_cell(ws, row_num, _C["Attendance %"], att_disp, bg=ds_att_bg(pct, status),
+                    h_align="center", bold=(status == "Absent" or pct < 75),
+                    fg=(AR.C_RED_DARK if (status == "Absent" or pct < 75) else AR.C_GREEN_DARK))
+            ds_cell(ws, row_num, _C["Duration (min)"],
+                    r.get("_dur_min", 0) if r.get("_dur_min", 0) > 0 else "",
+                    bg=row_bg, h_align="center")
+            ds_cell(ws, row_num, _C["Joined At"], str(r.get("first_join_ist", ""))[:19],
+                    bg=row_bg, h_align="center")
+            ds_cell(ws, row_num, _C["Left At"], str(r.get("last_leave_ist", ""))[:19],
+                    bg=row_bg, h_align="center")
+            ds_cell(ws, row_num, _C["Remarks"], AR._remarks(pct, status), bg=row_bg,
+                    fg=(AR.C_RED_DARK if (status == "Absent" or pct < 75)
+                        else AR.C_GREEN_DARK if pct >= 95 else DS_TEXT))
 
             if status == "Absent":
-                fb_val, fb_col, fb_bg = "Absent", AR.C_GREY_BD, AR.C_GREY_LITE
+                fb_val, fb_lev = "Absent", "muted"
             elif (str(r.get("session_id", "")), sid) in fb_pairs:
-                fb_val, fb_col, fb_bg = "✅  Yes", AR.C_GREEN_DARK, AR.C_GREEN
+                fb_val, fb_lev = "✅  Yes", "ok"
             else:
-                fb_val, fb_col, fb_bg = "❌  No", AR.C_RED_DARK, AR.C_RED_LITE
-            fbc = ws.cell(row=row_num, column=_C["Feedback Given?"])
-            fbc.value = fb_val
-            fbc.font = AR._font(bold=True, size=10, color=fb_col)
-            fbc.fill = AR._fill(fb_bg); fbc.alignment = AR._align("center", "center"); fbc.border = AR._border()
+                fb_val, fb_lev = "❌  No", "high"
+            ds_pill(ws, row_num, _C["Feedback Given?"], fb_val, fb_lev)
 
             _rt_key = (str(r.get("session_id", "")), sid)
             if status != "Absent" and _rt_key in fb_ratings:
                 _rt_val = fb_ratings[_rt_key]
-                AR.style_data_cell(ws, row_num, _C["Feedback Rating (/10)"], _rt_val,
-                                   bg=AR._rating_bg(_rt_val), h_align="center", number_fmt="0.#")
+                ds_cell(ws, row_num, _C["Feedback Rating (/10)"], _rt_val,
+                        bg=ds_rating_bg(_rt_val), h_align="center", number_fmt="0.#")
             else:
-                AR.style_data_cell(ws, row_num, _C["Feedback Rating (/10)"], "—",
-                                   bg=row_bg, h_align="center")
+                ds_cell(ws, row_num, _C["Feedback Rating (/10)"], "—", bg=row_bg, h_align="center")
 
-            # aggregate block, then OVERWRITE Why Flagged with the combined,
-            # action-oriented reasons (key figures/actions highlighted red).
+            # aggregate block, then the combined, action-oriented Why Flagged
             _agg_cells(row_num, agg_key, row_bg)
-            wc = ws.cell(row=row_num, column=_C["Why Flagged"])
-            _rt = _why_flagged_richtext(reason_runs)
-            wc.value = _rt
-            wc.fill = AR._fill(AR.C_AMBER_PALE)
-            wc.font = AR._font(size=10, color=AR.C_RED_DARK if isinstance(_rt, str) else "333333")
-            wc.alignment = AR._align("left", "center", wrap=True); wc.border = AR._border()
-
-            ws.row_dimensions[row_num].height = max(30, 15 * len(reason_runs) + 8)
+            ds_why_text(ws, row_num, _C["Why Flagged"], reason_runs, col_width=62)
+            ds_followup_cells(ws, row_num, _C["Action Taken"])
             any_rendered = True
+            n_rows += 1
             row_num += 1
 
     if not any_rendered:
-        AR.write_section_banner(ws, row_num, N,
-                                "  ✅  No learner follow-ups required for this day.",
-                                AR.C_GREEN_DARK, h_align="center")
+        ds_empty(ws, row_num, N, "✅  No learner follow-ups required for this day.")
         row_num += 1
+    ds_guide_count(ws, "Learners needing follow-up", n_rows)
 
-    # ── freeze / filter / widths (same convention as the daily report) ───────
-    from openpyxl.utils import get_column_letter
-    ws.auto_filter.ref = f"A3:{get_column_letter(N)}{max(row_num - 1, 3)}"
-    ws.freeze_panes = "A4"
-    AR.auto_col_width(ws)
-    # a touch wider for the wordy aggregate columns
-    ws.column_dimensions[get_column_letter(_C["Why Flagged"])].width = 48
-    ws.column_dimensions[get_column_letter(_C["Overall Remarks"])].width = 16
-    ws.column_dimensions[get_column_letter(_C["Rank"])].width = 7
+    ds_finish(ws, HDR_ROW, N, widths={
+        "Rank": 7, "Tech Name": 22, "Duration": 26, "Student Name": 22, "Phone": 15,
+        "Status": 12, "Attendance %": 12, "Duration (min)": 10, "Joined At": 19, "Left At": 19,
+        "Remarks": 12, "Feedback Given?": 11, "Feedback Rating (/10)": 10,
+        "Sessions (P/T)": 10, "Agg Attendance %": 11, "Agg Duration Att %": 11,
+        "Last Present": 12, "Absent Streak": 9, "Feedbacks": 9, "Feedback Part. %": 10,
+        "Avg Rating (/10)": 9, "Overall Remarks": 14,
+    }, why_col=_C["Why Flagged"], why_width=62, default_width=11, tab_color=DS_SECTION,
+       followup=(_C["Action Taken"], FOLLOWUP_ACTIONS["attendance"]))
     return ws
 
 
@@ -1872,7 +2351,39 @@ def upload_report(folder_name: str, filename: str, buf: io.BytesIO, base_prefix:
                               supportsAllDrives=True).execute()
     link = up.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{up.get('id','')}/edit"
     log.info("Uploaded native Google Sheet → %s / %s", folder_name, target_name)
+    _enable_followup_timestamps(up.get("id", ""))
     return link
+
+
+def _enable_followup_timestamps(spreadsheet_id: str) -> None:
+    """Make the coordinator follow-up columns work on the uploaded Google Sheet:
+    turn on iterative calculation (so the self-referencing Follow-Up DateTime
+    formula keeps the time at which Follow-Up Done? was set instead of ticking
+    with NOW()) and pin the sheet's time zone to IST so the stamp is local time.
+    Best-effort: a failure is logged with the manual fix and never blocks the run."""
+    if not spreadsheet_id:
+        return
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build as gbuild
+        creds = service_account.Credentials.from_service_account_file(
+            AR.SERVICE_ACCOUNT_FILE,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]).with_subject(IMPERSONATE_USER)
+        sheets = gbuild("sheets", "v4", credentials=creds, cache_discovery=False)
+        sheets.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": [{
+            "updateSpreadsheetProperties": {
+                "properties": {
+                    "timeZone": FOLLOWUP_TIMEZONE,
+                    "iterativeCalculationSettings": {"maxIterations": 1,
+                                                     "convergenceThreshold": 0.0}},
+                "fields": "timeZone,iterativeCalculationSettings"}}]}).execute()
+        log.info("Follow-up DateTime enabled on the sheet (iterative calculation on, tz=%s).",
+                 FOLLOWUP_TIMEZONE)
+    except Exception as exc:                                   # noqa: BLE001
+        log.warning("Could not enable iterative calculation on the uploaded sheet (%s). "
+                    "Follow-Up DateTime will show a circular-reference error until it is "
+                    "switched on by hand: File ▸ Settings ▸ Calculation ▸ Iterative "
+                    "calculation = On.", exc)
 
 
 def upload_datewise(report_date: date, filename: str, buf: io.BytesIO) -> str:
@@ -1921,11 +2432,11 @@ def _session_metrics(sess, att_period, fb_period, tf_ids):
 def build_learner_followups_period(ws, att_period, fb_period, agg_map, start, end, label):
     """One row per (student, tech) flagged on >=1 day in the period, with the
     count of Attendance / Feedback / Low-Rating days and till-date aggregate."""
-    AR.style_title_row(ws, 1, 1, LPN,
-                       f"IntelliBI  |  Learner Attendance Follow-Ups — {label}")
-    ws.cell(row=1, column=1).alignment = AR._align("center", "center")
-    AR.write_header_row(ws, 2, LP_COLS)
-    row_num = 3
+    ds_title(ws, LPN, "Learner Attendance Follow-Ups (period roll-up)", label,
+             "One row per learner flagged on at least one day in the period; Rank 1 = most urgent "
+             "within the technology (chip: High = rank 1–3, Medium = 4–6, Info = others).   "
+             "Colour key: ■ High = red  ■ Medium = amber  ■ Info = blue  ■ OK = green.")
+    row_num = ds_headers(ws, 3, LP_COLS)
 
     fb_pairs = set()
     fb_ratings = {}
@@ -2011,9 +2522,16 @@ def build_learner_followups_period(ws, att_period, fb_period, agg_map, start, en
             p["_rank"] = rk
             ordered.append(p)
     any_rendered = False
+    n_rows = 0
+    _last_tech = None
     for p in ordered:
         rk = p["_rank"]
         agg = p["agg"]
+        if (p["cn"], p["ct"]) != _last_tech:            # technology banner
+            _last_tech = (p["cn"], p["ct"])
+            row_num = ds_section(ws, row_num, LPN,
+                                 f"{p['cn']}  —  {p['ct']}" if p["ct"] else f"{p['cn']}", level=1)
+        bg = ds_zebra(rk)
         vals = {
             "Rank": rk, "Tech Name": p["cn"], "Duration": p["ct"],
             "Student Name": p["nm"], "Phone": p["ph"],
@@ -2024,47 +2542,46 @@ def build_learner_followups_period(ws, att_period, fb_period, agg_map, start, en
         }
         for c in LP_COLS:
             if c in vals:
-                AR.style_data_cell(ws, row_num, _LP[c], vals[c], bg=AR.C_WHITE,
-                                   h_align="left" if c in ("Tech Name", "Duration", "Student Name")
-                                   else "center")
-        rkc = ws.cell(row=row_num, column=_LP["Rank"])
-        _rk_bg, _rk_col = ((AR.C_RED_LITE, AR.C_RED_DARK) if rk <= 3
-                           else (AR.C_AMBER, AR.C_AMBER_DARK) if rk <= 6 else (AR.C_WHITE, "000000"))
-        rkc.font = AR._font(bold=True, size=11, color=_rk_col)
-        rkc.fill = AR._fill(_rk_bg); rkc.alignment = AR._align("center", "center"); rkc.border = AR._border()
-        AR.style_data_cell(ws, row_num, _LP["Agg Attendance %"], agg["attendance_pct"],
-                           bg=AR._att_bg(agg["attendance_pct"], ""), h_align="center", number_fmt='0.0"%"')
-        AR.style_data_cell(ws, row_num, _LP["Agg Duration Att %"], p["agg_dur"],
-                           bg=AR._att_bg(p["agg_dur"], ""), h_align="center", number_fmt='0.0"%"')
-        AR.style_data_cell(ws, row_num, _LP["Feedback Part. %"], p["part"],
-                           bg=(AR.C_GREEN_PALE if p["part"] >= 50 else AR.C_AMBER if p["part"] > 0 else AR.C_RED_LITE),
-                           h_align="center", number_fmt='0.0"%"')
+                ds_cell(ws, row_num, _LP[c], vals[c], bg=bg,
+                        bold=(c == "Student Name"),
+                        h_align="left" if c in ("Tech Name", "Duration", "Student Name")
+                        else "center")
+        ds_priority(ws, row_num, _LP["Rank"], rk,
+                    "high" if rk <= 3 else "medium" if rk <= 6 else "info")
+        for hname, v in (("Attendance Flag Days", p["a_days"]), ("Feedback Flag Days", p["b_days"]),
+                         ("Low-Rating Days", p["c_days"]), ("Total Flag Days", p["total_flag"])):
+            ds_pill(ws, row_num, _LP[hname], v, ("high" if v >= 3 else "medium" if v >= 1 else "none"),
+                    bold=(v >= 1))
+        ds_cell(ws, row_num, _LP["Agg Attendance %"], agg["attendance_pct"],
+                bg=ds_att_bg(agg["attendance_pct"], ""), h_align="center", number_fmt='0.0"%"')
+        ds_cell(ws, row_num, _LP["Agg Duration Att %"], p["agg_dur"],
+                bg=ds_att_bg(p["agg_dur"], ""), h_align="center", number_fmt='0.0"%"')
+        ds_pill(ws, row_num, _LP["Feedback Part. %"], p["part"],
+                ("ok" if p["part"] >= 50 else "medium" if p["part"] > 0 else "high"),
+                bold=False, number_fmt='0.0"%"')
         if agg.get("avg_rating") is not None:
-            AR.style_data_cell(ws, row_num, _LP["Avg Rating (/10)"], agg["avg_rating"],
-                               bg=AR._rating_bg(agg["avg_rating"]), h_align="center", number_fmt='0.0')
+            ds_cell(ws, row_num, _LP["Avg Rating (/10)"], agg["avg_rating"],
+                    bg=ds_rating_bg(agg["avg_rating"]), h_align="center", number_fmt='0.0')
         else:
-            AR.style_data_cell(ws, row_num, _LP["Avg Rating (/10)"], "—", bg=AR.C_WHITE, h_align="center")
-        wc = ws.cell(row=row_num, column=_LP["Why Flagged"])
-        _rt = _why_flagged_richtext(p["reason_runs"])
-        wc.value = _rt
-        wc.fill = AR._fill(AR.C_AMBER_PALE)
-        wc.font = AR._font(size=10, color=AR.C_RED_DARK if isinstance(_rt, str) else "333333")
-        wc.alignment = AR._align("left", "center", wrap=True); wc.border = AR._border()
-        ws.row_dimensions[row_num].height = max(30, 15 * len(p["reason_runs"]) + 8)
+            ds_cell(ws, row_num, _LP["Avg Rating (/10)"], "—", bg=bg, h_align="center")
+        ds_cell(ws, row_num, _LP["Overall Remarks"], AR._remarks(p["agg_dur"], ""),
+                bg=ds_att_bg(p["agg_dur"], ""), bold=(p["agg_dur"] < 75),
+                fg=(AR.C_RED_DARK if p["agg_dur"] < 75 else AR.C_GREEN_DARK if p["agg_dur"] >= 95 else DS_TEXT))
+        ds_why_text(ws, row_num, _LP["Why Flagged"], p["reason_runs"], col_width=60)
         any_rendered = True
+        n_rows += 1
         row_num += 1
 
     if not any_rendered:
-        AR.write_section_banner(ws, row_num, LPN,
-                                "  ✅  No learner follow-ups in this period.",
-                                AR.C_GREEN_DARK, h_align="center")
+        ds_empty(ws, row_num, LPN, "✅  No learner follow-ups in this period.")
         row_num += 1
-    from openpyxl.utils import get_column_letter
-    ws.auto_filter.ref = f"A2:{get_column_letter(LPN)}{max(row_num - 1, 2)}"
-    ws.freeze_panes = "A3"
-    AR.auto_col_width(ws)
-    ws.column_dimensions[get_column_letter(_LP["Why Flagged"])].width = 50
-    ws.column_dimensions[get_column_letter(_LP["Rank"])].width = 7
+    ds_guide_count(ws, "Learners needing follow-up", n_rows)
+    ds_finish(ws, 3, LPN, widths={
+        "Rank": 7, "Tech Name": 22, "Duration": 26, "Student Name": 22, "Phone": 15,
+        "Sessions (P/T) in Period": 12, "Attendance Flag Days": 11, "Feedback Flag Days": 11,
+        "Low-Rating Days": 11, "Total Flag Days": 10, "Agg Attendance %": 11,
+        "Agg Duration Att %": 11, "Feedback Part. %": 10, "Avg Rating (/10)": 9, "Overall Remarks": 14,
+    }, why_col=_LP["Why Flagged"], why_width=60, default_width=11, tab_color=DS_SECTION)
     return ws
 
 
@@ -2072,25 +2589,27 @@ def build_instructor_followups_period(ws, sess_period, att_period, fb_period, tf
                                       instr_phones, label):
     """One row per (instructor, tech) over the period: session counts, missing
     feedback, avg attendance/rating, flagged-session count, avg schedule diff."""
-    AR.style_title_row(ws, 1, 1, IPN,
-                       f"IntelliBI  |  Instructor Follow-Ups — {label}")
-    ws.cell(row=1, column=1).alignment = AR._align("center", "center")
-    AR.write_header_row(ws, 2, IP_COLS)
-    row_num = 3
+    ds_title(ws, IPN, "Instructor Follow-Ups (period roll-up)", label,
+             "One row per instructor and technology with at least one missing feedback or flagged "
+             "session in the period. Priority chip on Tech Name: High = feedback missing in more "
+             "than half the sessions or sessions running short, Medium = otherwise.   "
+             "Colour key: ■ High = red  ■ Medium = amber  ■ OK = green.")
+    row_num = ds_headers(ws, 3, IP_COLS)
+    _ip_widths = {"Tech Name": 22, "Duration": 26, "Instructor": 20, "Phone": 15, "Sessions": 9,
+                  "Sessions Missing Feedback": 12, "Feedback Given %": 11, "Avg Att %": 10,
+                  "Avg Rating (/10)": 10, "Flagged Sessions": 10, "Avg Diff Mins": 10}
 
     if sess_period is None or sess_period.empty:
-        AR.write_section_banner(ws, row_num, IPN, "  No sessions in this period.",
-                                AR.C_GREY_BD, h_align="center")
-        from openpyxl.utils import get_column_letter
-        ws.freeze_panes = "A3"; AR.auto_col_width(ws)
+        ds_empty(ws, row_num, IPN, "No sessions in this period.", level="muted")
+        ds_finish(ws, 3, IPN, widths=_ip_widths, why_col=_IP["Why Flagged"], why_width=60,
+                  default_width=11, tab_color=DS_SECTION)
         return ws
 
     sess_f = AR._prefer_instructor_name(sess_period)
-    tf_ids = (set(tf_period["session_id"].dropna().unique())
-              if (tf_period is not None and not tf_period.empty and "session_id" in tf_period.columns)
-              else set())
+    tf_ids = AR.teacher_feedback_session_ids(tf_period)   # content-bearing rows only
 
     any_rendered = False
+    n_rows = 0
     for (cn, ct, instr), grp in sess_f.groupby(["course_name", "course_title", "tutor_name"], sort=True):
         n = len(grp)
         miss = flagged = 0
@@ -2130,40 +2649,42 @@ def build_instructor_followups_period(ws, sess_period, att_period, fb_period, tf
             "Flagged Sessions": flagged,
             "Avg Diff Mins": (f"{avg_diff:+.0f}" if avg_diff is not None else "—"),
         }
+        bg = ds_zebra(n_rows)
         for c in IP_COLS:
             if c in vals:
-                AR.style_data_cell(ws, row_num, _IP[c], vals[c], bg=AR.C_WHITE,
-                                   h_align="left" if c in ("Tech Name", "Duration", "Instructor")
-                                   else "center")
-        AR.style_data_cell(ws, row_num, _IP["Feedback Given %"], given_pct,
-                           bg=(AR.C_GREEN_PALE if given_pct >= 80 else AR.C_AMBER if given_pct > 0 else AR.C_RED_LITE),
-                           h_align="center", number_fmt='0.0"%"')
-        AR.style_data_cell(ws, row_num, _IP["Avg Att %"], avg_att, bg=AR._att_bg(avg_att, ""),
-                           h_align="center", number_fmt='0.0"%"')
+                ds_cell(ws, row_num, _IP[c], vals[c], bg=bg, bold=(c == "Instructor"),
+                        h_align="left" if c in ("Tech Name", "Duration", "Instructor")
+                        else "center")
+        # priority = the period's own severity signals: feedback missing in more
+        # than half the sessions, or sessions running short on average
+        _short = (avg_diff is not None and avg_diff <= -INSTR_SHORT_MIN)
+        ds_priority(ws, row_num, _IP["Tech Name"], cn,
+                    "high" if (_short or (n and miss / n > 0.5)) else "medium", h_align="left")
+        ds_pill(ws, row_num, _IP["Sessions Missing Feedback"], miss,
+                ("high" if miss else "ok"), bold=bool(miss))
+        ds_pill(ws, row_num, _IP["Feedback Given %"], given_pct,
+                ("ok" if given_pct >= 80 else "medium" if given_pct > 0 else "high"),
+                bold=False, number_fmt='0.0"%"')
+        ds_cell(ws, row_num, _IP["Avg Att %"], avg_att, bg=ds_att_bg(avg_att, ""),
+                h_align="center", number_fmt='0.0"%"')
         if avg_rat is not None:
-            AR.style_data_cell(ws, row_num, _IP["Avg Rating (/10)"], avg_rat,
-                               bg=AR._rating_bg(avg_rat), h_align="center", number_fmt='0.0')
+            ds_cell(ws, row_num, _IP["Avg Rating (/10)"], avg_rat, bg=ds_rating_bg(avg_rat),
+                    h_align="center", number_fmt='0.0')
         else:
-            AR.style_data_cell(ws, row_num, _IP["Avg Rating (/10)"], "—", bg=AR.C_WHITE, h_align="center")
-        wc = ws.cell(row=row_num, column=_IP["Why Flagged"])
-        wc.value = "\n".join(f"• {t}" for t in reasons)
-        wc.fill = AR._fill(AR.C_AMBER_PALE); wc.font = AR._font(size=10, color=AR.C_RED_DARK)
-        wc.alignment = AR._align("left", "center", wrap=True); wc.border = AR._border()
-        ws.row_dimensions[row_num].height = 30
+            ds_cell(ws, row_num, _IP["Avg Rating (/10)"], "—", bg=bg, h_align="center")
+        ds_pill(ws, row_num, _IP["Flagged Sessions"], flagged, ("medium" if flagged else "ok"),
+                bold=bool(flagged))
+        ds_why_text(ws, row_num, _IP["Why Flagged"], [[(t, True)] for t in reasons], col_width=60)
         any_rendered = True
+        n_rows += 1
         row_num += 1
 
     if not any_rendered:
-        AR.write_section_banner(ws, row_num, IPN,
-                                "  ✅  No instructor follow-ups in this period.",
-                                AR.C_GREEN_DARK, h_align="center")
+        ds_empty(ws, row_num, IPN, "✅  No instructor follow-ups in this period.")
         row_num += 1
-    from openpyxl.utils import get_column_letter
-    ws.auto_filter.ref = f"A2:{get_column_letter(IPN)}{max(row_num - 1, 2)}"
-    ws.freeze_panes = "A3"
-    AR.auto_col_width(ws)
-    ws.column_dimensions[get_column_letter(_IP["Why Flagged"])].width = 50
-    ws.column_dimensions[get_column_letter(_IP["Instructor"])].width = 20
+    ds_guide_count(ws, "Instructors needing follow-up", n_rows)
+    ds_finish(ws, 3, IPN, widths=_ip_widths, why_col=_IP["Why Flagged"], why_width=60,
+              default_width=11, tab_color=DS_SECTION)
     return ws
 
 
@@ -2255,7 +2776,7 @@ INTERVIEW_FEEDBACK_TAB = "Interview Feedback"
 INTERVIEW_CONSOLIDATE_SHEET_ID = "16IQtgrlvYZpEpsmtzWhyaS9ZgRHYB_jzQBF--DckCPg"
 
 IV_COLS = ["Interview Time", "Batch Name (Class)", "Batch Title / Duration",
-           "Candidate Name", "Phone", "Why Flagged"]
+           "Candidate Name", "Phone", "Why Flagged"] + FOLLOWUP_COLS
 IVN  = len(IV_COLS)
 _IVC = {h: i + 1 for i, h in enumerate(IV_COLS)}
 
@@ -2800,47 +3321,53 @@ def load_interview_reminders(sheets, drive, report_date):
     return out
 
 
-def _iv_write_row(ws, row_num, values, why_runs, bg, why_bg, bold):
+def _iv_write_row(ws, row_num, values, why_runs, level, bold, zebra_i=0, chip_text=None):
+    """One reminder row in the common style: the first cell (Interview Time) is
+    the priority chip (Medium = call today, Info = message today; the interviewer
+    row is a bold 'Info' row), other cells neutral, Why Flagged numbered with the
+    action line."""
+    bg = ds_zebra(zebra_i)
     for col_name in IV_COLS:
         cidx = _IVC[col_name]
+        if col_name in FOLLOWUP_COLS:
+            continue                                   # written once below
         if col_name == "Why Flagged":
-            wc = ws.cell(row=row_num, column=cidx)
-            rt = _why_flagged_richtext(why_runs)
-            wc.value = rt
-            wc.fill = AR._fill(why_bg)
-            wc.font = AR._font(size=10, color=AR.C_RED_DARK if isinstance(rt, str) else "333333")
-            wc.alignment = AR._align("left", "center", wrap=True)
-            wc.border = AR._border()
+            ds_why_text(ws, row_num, cidx, why_runs, col_width=66, min_height=34)
+        elif col_name == "Interview Time":
+            ds_priority(ws, row_num, cidx, values.get(col_name, ""), level, h_align="left")
         else:
             h_align = "center" if col_name == "Phone" else "left"
-            AR.style_data_cell(ws, row_num, cidx, values.get(col_name, ""),
-                               bg=bg, bold=bold, h_align=h_align, wrap=True)
-    ws.row_dimensions[row_num].height = 46
+            ds_cell(ws, row_num, cidx, values.get(col_name, ""), bg=bg, bold=bold,
+                    h_align=h_align, wrap=True)
+    ds_followup_cells(ws, row_num, _IVC["Action Taken"])
 
 
 def _iv_finish(ws, row_num):
-    from openpyxl.utils import get_column_letter
-    ws.auto_filter.ref = f"A2:{get_column_letter(IVN)}{max(row_num - 1, 2)}"
-    ws.freeze_panes = "A3"
-    AR.auto_col_width(ws)
-    ws.column_dimensions[get_column_letter(_IVC["Why Flagged"])].width = 66
-    ws.column_dimensions[get_column_letter(_IVC["Interview Time"])].width = 26
-    ws.column_dimensions[get_column_letter(_IVC["Batch Title / Duration"])].width = 24
-    ws.column_dimensions[get_column_letter(_IVC["Candidate Name"])].width = 24
+    ds_finish(ws, 3, IVN, widths={
+        "Interview Time": 32, "Batch Name (Class)": 20, "Batch Title / Duration": 28,
+        "Candidate Name": 28, "Phone": 16,
+    }, why_col=_IVC["Why Flagged"], why_width=66, default_width=16, tab_color=DS_SECTION,
+       followup=(_IVC["Action Taken"], FOLLOWUP_ACTIONS["interview"]))
 
 
 def build_interview_reminders(ws, sheets, drive, service, att_agg,
                               report_date, period_label=None):
     """Learner Instructor Interview Reminder tab. Interviewer row first (distinct
-    background), then learner rows sorted by interview time; a coloured banner
-    separates each batch/interview. The interviewer comes from the schedule file's
-    Interview_Helper tab (never the batch Instructor). Additive only."""
-    title = (f"IntelliBI  |  Batch Coordinator — Learner & Instructor Interview "
-             f"Reminders  |  {period_label or report_date.strftime('%d-%b-%Y')}")
-    AR.style_title_row(ws, 1, 1, IVN, title)
-    ws.cell(row=1, column=1).alignment = AR._align("center", "center")
-    AR.write_header_row(ws, 2, IV_COLS)
-    row_num = 3
+    background), then learner rows sorted by interview time; a banner separates
+    each batch/interview. The interviewer comes from the schedule file's
+    Interview_Helper tab (never the batch Instructor). Additive only.
+    Presentation: common report design system — interview = section banner with
+    today's action (MESSAGE / CALL), interviewer row = bold Info row, learners as
+    neutral zebra rows, Interview Time cell = priority chip."""
+    period = period_label or report_date.strftime('%d-%b-%Y')
+    ds_title(ws, IVN, "Learner & Instructor Interview Reminders", period,
+             "Interviews that need a reminder today: MESSAGE two days before, CALL one day before. "
+             "The interviewer row comes first in each group, then the candidates by time. "
+             "Priority chip on Interview Time: Medium = call today, Info = message today."
+             + DS_GUIDE_FOLLOWUP)
+    HDR_ROW = 3
+    row_num = ds_headers(ws, HDR_ROW, IV_COLS)
+    ds_followup_headers(ws, HDR_ROW, _IVC["Action Taken"])
 
     try:
         groups = load_interview_reminders(sheets, drive, report_date)
@@ -2849,15 +3376,15 @@ def build_interview_reminders(ws, sheets, drive, service, att_agg,
         groups = []
 
     if not groups:
-        AR.write_section_banner(ws, row_num, IVN,
-                                "  No interview follow-ups due today.",
-                                AR.C_GREEN_DARK, h_align="center")
+        ds_empty(ws, row_num, IVN, "✅  No interview follow-ups due today.")
+        ds_guide_count(ws, "Reminders due today", 0)
         _iv_finish(ws, row_num + 1)
         return ws
 
     iv_phone_idx = load_interviewer_phone_index(service)   # Instructor tab -> phone
     ph_full, ph_name = _iv_phone_index(att_agg)
 
+    n_rows = 0
     for g in groups:
         bname  = g["batch_name"] or "—"
         btitle = g["batch_title"] or "—"
@@ -2865,16 +3392,14 @@ def build_interview_reminders(ws, sheets, drive, service, att_agg,
         action = g["action"]
         date_label = idate.strftime("%d-%b-%Y")
         action_txt = "MESSAGE (2 days prior)" if action == "message" else "CALL (1 day prior)"
+        level = "medium" if action == "call" else "info"
         # ── batch/interview separator banner ─────────────────────────────────
-        AR.write_section_banner(
+        row_num = ds_section(
             ws, row_num, IVN,
-            f"  Interview — {bname}   ·   {btitle}   ·   {date_label}"
-            f"      Today: {action_txt}",
-            AR.C_TEAL, h_align="left")
-        ws.row_dimensions[row_num].height = 24
-        row_num += 1
+            f"Interview — {bname}   ·   {btitle}   ·   {date_label}"
+            f"      Today: {action_txt}   ·   {len(g['candidates'])} candidate(s)", level=1)
 
-        # ── Interviewer reminder — FIRST record, distinct blue background ─────
+        # ── Interviewer reminder — FIRST record, distinct (bold) row ──────────
         # Interviewer identity comes ONLY from the schedule file (Interview_Helper);
         # phone from the Instructor master tab (Active→Inactive, exact→initial). No
         # fallback to the batch Instructor. Name/phone stay blank when unavailable;
@@ -2899,13 +3424,16 @@ def build_interview_reminders(ws, sheets, drive, service, att_agg,
             "Candidate Name": iv_name_cell,
             "Phone": iv_phone,           # blank when not found (no placeholder)
         }, _iv_interviewer_runs(action, interviewer, batch_time, date_label, iv_note),
-           bg=AR.C_BLUE_LITE, why_bg=AR.C_BLUE_PALE, bold=True)
+           level=level, bold=True, zebra_i=0)
+        # make the interviewer row visibly distinct from the candidates below
+        for cidx in range(2, _IVC["Why Flagged"]):
+            ws.cell(row=row_num, column=cidx).fill = AR._fill(DS_INFO_BG)
         row_num += 1
+        n_rows += 1
 
         # ── Learner reminders — sorted by interview time ascending ───────────
         for i, c in enumerate(g["candidates"]):
             phone = _iv_resolve_phone(ph_full, ph_name, c["name"], bname)
-            alt = AR.C_WHITE if i % 2 == 0 else AR.C_ROW_ALT
             _iv_write_row(ws, row_num, {
                 "Interview Time": c["time_disp"],
                 "Batch Name (Class)": bname,
@@ -2913,9 +3441,11 @@ def build_interview_reminders(ws, sheets, drive, service, att_agg,
                 "Candidate Name": c["name"],
                 "Phone": phone or "—",
             }, _iv_learner_runs(action, c["name"], c["start_label"], date_label),
-               bg=alt, why_bg=AR.C_AMBER_PALE, bold=False)
+               level=level, bold=False, zebra_i=i)
             row_num += 1
+            n_rows += 1
 
+    ds_guide_count(ws, "Reminders due today", n_rows)
     _iv_finish(ws, row_num)
     return ws
 
@@ -3000,6 +3530,7 @@ def _generate_daily(service, report_date, sess_agg, att_agg, fb_agg, tf_agg, sus
             _iv_sheets, _iv_drive, service, att_agg, report_date)
     except Exception as _ive:
         log.exception("Interview Reminder tab skipped (%s).", _ive)
+    ds_enable_iterative_calc(wb)            # keeps the Follow-Up DateTime formula stable
     buf = io.BytesIO()
     wb.save(buf)
     # Filename carries the report period ("duration"), same convention/transform
