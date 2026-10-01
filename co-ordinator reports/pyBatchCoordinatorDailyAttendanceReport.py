@@ -100,6 +100,7 @@ import pyAttendaceFeedbackReport as AR
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import coordinator_periods as CP
+import coordinator_email as CE      # shared Coordinator e-mail (Operations Gmail account)
 
 # Reuse the coordinator flagging logic for "Why Flagged" (best-effort).
 try:
@@ -121,6 +122,18 @@ IMPERSONATE_USER  = "info@intellibiinnovationstechnologies.in"
 #   IntelliBI_Batch_Coordinator_Daily_Attendance_Report_12-Sep-2026_10.00_AM_-_12-Sep-2026_03.00_PM
 REPORT_BASENAME   = "IntelliBI_Batch_Coordinator_Daily_Attendance_Report"
 VERBOSE           = True
+
+# ── E-mail (sent after the report(s) are generated) ─────────────────────────
+# True  → generate the report(s) and e-mail the Google Sheet link(s)
+# False → generate / upload exactly the same, but send NO e-mail
+# Sent through the Operations Gmail account in credentials/email_config.py.
+SEND_EMAIL       = True
+EMAIL_SENDER     = "info@intellibiinnovationstechnologies.in"
+EMAIL_RECIPIENTS = ["info@intellibiinnovationstechnologies.in",
+                    "intellibihropsb2ch@gmail.com"]
+# Star (★) each report e-mail in the sending Gmail account once it is sent
+# (common/gmail_star.py; best-effort — never affects sending or the run).
+STAR_EMAIL_IN_GMAIL = True
 
 # =============================================================================
 #  REPORT GENERATION CONTROL  (flag-based; mirrors pyLeadFollowUpAnalysisReport.py)
@@ -3664,7 +3677,8 @@ def _generate_daily(service, report_date, sess_agg, att_agg, fb_agg, tf_agg, sus
     print(f"  Daily rows: {n_daily} | Aggregate groups: {len(agg_map)}")
     print(f"  Link: {link}\n{'='*64}\n")
     return {"link": link, "report_date": report_date.isoformat(),
-            "daily_rows": n_daily, "agg_groups": len(agg_map)}
+            "daily_rows": n_daily, "agg_groups": len(agg_map),
+            "task_counts": _task_counts(wb)}
 
 
 # =============================================================================
@@ -3775,7 +3789,46 @@ def generate():
         except Exception as _je:
             log.exception("Report job %s failed: %s", j, _je)
             results.append({"failed": True, "job": str(j), "error": str(_je)})
+    email_results(results)
     return results
+
+
+def email_results(results):
+    """One e-mail per generated report (same convention as the Sales lead
+    reports). Controlled ONLY by SEND_EMAIL — generation and the Drive upload
+    never depend on it. Returns True (all sent), False (one or more failed) or
+    None (nothing to send / disabled)."""
+    done = [r for r in (results or []) if isinstance(r, dict) and not r.get("failed")]
+    if not SEND_EMAIL:
+        print("[Email] SEND_EMAIL = False — report(s) generated, no e-mail sent.")
+        return None
+    if not done:
+        print("[Email] no report generated in this run — nothing to e-mail.")
+        return None
+    ok = True
+    for r in done:
+        if r.get("report_type"):                                   # Weekly / Monthly / Manual
+            kind, label = str(r["report_type"]).title(), r.get("period", "")
+            body = CE.batch_coordinator_html(kind, label, r.get("link"))
+        else:                                                      # Daily task list
+            kind = "Daily"
+            label = datetime.strptime(r["report_date"], "%Y-%m-%d").strftime("%d-%b-%Y")
+            body = CE.batch_coordinator_html(kind, label, r.get("link"), r.get("task_counts"))
+        ok = CE.send(f"{kind} Batch Coordinator Report - {label}", body,
+                     EMAIL_RECIPIENTS, sender=EMAIL_SENDER, star=STAR_EMAIL_IN_GMAIL) and ok
+    return ok
+
+
+def _task_counts(wb):
+    """Rows needing action per task tab, read from each tab's own guide-strip
+    count ("… : N", written by ds_guide_count) — for the e-mail only."""
+    import re as _re
+    out = {}
+    for ws in wb.worksheets:
+        m = _re.search(r":\s*(\d+)\s*$", str(ws.cell(row=2, column=1).value or ""))
+        if m:
+            out[ws.title] = int(m.group(1))
+    return out
 
 
 def main():

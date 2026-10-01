@@ -78,9 +78,10 @@
     the Batch Coordinator report of that type and period (coordinator_periods):
         <coordinator folder>/<Daily|Weekly|Monthly|Manual> Coordinator Reports/
                              <reporting-period folder>/
-    versioned exactly like the Coordinator report ("- Version N"), plus a local
-    copy in output/reports/coordinator_performance/<same folders>/.
-    Tabs: Dashboard | Progress Trend | Pending & Overdue | Task Register |
+    versioned exactly like the Coordinator report ("- Version N"). Google Drive
+    is the ONLY place a report is stored: the workbook is built in memory and
+    uploaded from memory — no local copy, no temporary file.
+    Tabs: Dashboard | Progress Trend | Task Register |
           Data Coverage & Rules
 
   RUN
@@ -128,6 +129,7 @@ from openpyxl.chart import BarChart, LineChart, Reference
 # this report can never drift from what the Coordinator actually sees.
 import pyBatchCoordinatorDailyAttendanceReport as BC
 import coordinator_periods as CP              # shared periods + Drive layout
+import coordinator_email as CE                # shared e-mail (Operations Gmail account)
 
 AR = BC.AR
 try:
@@ -141,9 +143,38 @@ log = logging.getLogger("CoordinatorTaskPerformance")
 #  RUN CONFIGURATION
 # =============================================================================
 REPORT_BASENAME    = "IntelliBI_Coordinator_Task_Performance_Report"
-UPLOAD_TO_DRIVE    = True        # False = build + save the local copy only
-SAVE_LOCAL_COPY    = True
+UPLOAD_TO_DRIVE    = True        # False = dry run: built in memory only, nothing saved anywhere
 VERBOSE            = True
+
+# ── E-mail (sent after the report(s) are generated) ─────────────────────────
+# True  → generate the report(s) and e-mail the result + Google Sheet link(s)
+# False → generate / upload exactly the same, but send NO e-mail
+# Sent through the Operations Gmail account in credentials/email_config.py.
+SEND_EMAIL       = True
+EMAIL_SENDER     = "info@intellibiinnovationstechnologies.in"
+EMAIL_RECIPIENTS = ["info@intellibiinnovationstechnologies.in",
+                    "intellibihropsb2ch@gmail.com"]
+# Star (★) each report e-mail in the sending Gmail account once it is sent
+# (common/gmail_star.py; best-effort — never affects sending or the run).
+STAR_EMAIL_IN_GMAIL = True
+
+# "Performance vs Goals" (e-mail body only): one bar per task group that has
+# tasks in the reported period — its Completion % (the SAME figure as the
+# Dashboard scorecard) against this benchmark. >= benchmark → green, below → red.
+COMPLETION_BENCHMARK = 95.0
+
+# Short, management-friendly names used ONLY in the e-mail's Performance vs
+# Goals section. Keyed by the TASK_GROUPS "name" below — task-group identity,
+# the Dashboard and every other tab keep the registry names. A group missing
+# here is shown under its registry name.
+EMAIL_GROUP_LABELS = {
+    "Learner Attendance Follow-Ups":         "Learner Attendance",
+    "Learner Assignment Follow-Ups":         "Learner Assignment",
+    "Learner Admission Formalities":         "Learner Admission Formalities",
+    "Wise & Interview Feedback Validation":  "Learner Admission Formalities",
+    "Instructor Follow-Ups":                 "Instructor Instructions",
+    "Learner Instructor Interview Reminder": "Interview Reminder",
+}
 
 # =============================================================================
 #  REPORT GENERATION CONTROL  (same scheme as pyLeadFollowUpAnalysisReport.py)
@@ -156,7 +187,7 @@ VERBOSE            = True
 #  GENERATE_AUTO = False → each GENERATE_* flag works independently (several can
 #  be True). The dates pin a specific period; None = today / this week / this
 #  month. Manual needs both dates (Start <= End).
-GENERATE_AUTO    = True
+GENERATE_AUTO    = False
 
 GENERATE_DAILY   = True
 GENERATE_WEEKLY  = False
@@ -176,13 +207,11 @@ MANUAL_END_DATE       = "2026-09-22"
 STATUS_ON_TRACK = 75.0
 STATUS_WATCH    = 45.0
 
-# Time-to-complete buckets (descriptive only — NOT an SLA): upper bound in hours
-# since the task was first generated, for completions on the report day.
-TTC_BUCKETS = [(1, "Within 1 hour"), (3, "1 – 3 hours"), (6, "3 – 6 hours"),
-               (None, "Over 6 hours (same day)")]
-
 CACHE_DIR = os.path.join(_PROJECT, "cache", "coordinator_performance")
-OUTPUT_DIR = os.path.join(_PROJECT, "output", "reports", "coordinator_performance")
+# Where earlier versions of this script kept a local copy of every report. The
+# report is no longer written to disk; each run removes any such leftover copies
+# (only this report's own .xlsx files, then the folders they leave empty).
+LEGACY_OUTPUT_DIR = os.path.join(_PROJECT, "output", "reports", "coordinator_performance")
 
 # =============================================================================
 #  TASK GROUP REGISTRY
@@ -857,23 +886,28 @@ def summarise(tasks: list) -> dict:
     }
 
 
-def hourly_progress(tasks: list, day: date, now: datetime):
-    """Within-day progress for ONE report day: cumulative tasks generated (by
-    the time each task first appeared), cumulative completed (by its completion
-    stamp) and open = generated - completed, per hour. Completions without a
-    valid stamp are not placed on the hour axis (reported separately)."""
-    ts = [t for t in tasks if t["day"] == day]
+def hourly_progress(tasks: list, days, now: datetime):
+    """Within-day progress: cumulative tasks generated (by the time each task
+    first appeared ON its report day), cumulative completed (by its completion
+    stamp on its report day) and open = generated - completed, per hour (IST).
+    `days` = one report day (Daily) or the period's report days (Weekly /
+    Monthly / Manual): several days are combined by hour of day, i.e. the sum
+    of each day's own hour-by-hour figures — for a single day the result is
+    exactly that day's progress. Completions without a valid stamp are not
+    placed on the hour axis (reported separately)."""
+    days = {days} if isinstance(days, date) else set(days)
+    ts = [t for t in tasks if t["day"] in days]
     if not ts:
         return []
-    gen_h = [t["first_seen"].hour for t in ts if t["first_seen"] and t["first_seen"].date() == day]
+    gen_h = [t["first_seen"].hour for t in ts if t["first_seen"] and t["first_seen"].date() == t["day"]]
     done_h = [t["completed_at"].hour for t in ts
-              if t["completed_at"] and t["completed_at"].date() == day]
-    marks = gen_h + done_h + ([now.hour] if now.date() == day else [])
+              if t["completed_at"] and t["completed_at"].date() == t["day"]]
+    marks = gen_h + done_h + ([now.hour] if now.date() in days else [])
     if not marks:
         return []
     first, last = min(marks), max(marks)
     rows, d_cum = [], 0
-    g_cum = sum(1 for t in ts if not t["first_seen"] or t["first_seen"].date() < day)
+    g_cum = sum(1 for t in ts if not t["first_seen"] or t["first_seen"].date() < t["day"])
     for h in range(first, last + 1):
         g_cum += sum(1 for x in gen_h if x == h)
         d_new = sum(1 for x in done_h if x == h)
@@ -893,36 +927,6 @@ def daywise_progress(tasks: list, days: list):
     return rows
 
 
-def completion_hour_profile(tasks: list):
-    """Completions by hour of day (IST) — shows whether work is spread across the
-    day or bunched at the end."""
-    hrs = defaultdict(int)
-    for t in tasks:
-        if t["completed_at"]:
-            hrs[t["completed_at"].hour] += 1
-    tot = sum(hrs.values())
-    return [{"label": datetime(2000, 1, 1, h).strftime("%I %p").lstrip("0"), "hour": h,
-             "count": hrs[h], "pct": _pct(hrs[h], tot)} for h in sorted(hrs)]
-
-
-def ttc_profile(tasks: list):
-    """How quickly tasks are completed after they were generated."""
-    out = [{"label": lbl, "count": 0} for _ub, lbl in TTC_BUCKETS]
-    out.append({"label": "Completed on a later day (late)", "count": 0})
-    for t in tasks:
-        if t["status"] == ST_LATE:
-            out[-1]["count"] += 1
-        elif t["status"] == ST_ON_TIME and t["ttc_h"] is not None:
-            for i, (ub, _lbl) in enumerate(TTC_BUCKETS):
-                if ub is None or t["ttc_h"] <= ub:
-                    out[i]["count"] += 1
-                    break
-    tot = sum(r["count"] for r in out)
-    for r in out:
-        r["pct"] = _pct(r["count"], tot)
-    return out
-
-
 # =============================================================================
 #  WORKBOOK  (IntelliBI Coordinator design system, reused from the task report)
 # =============================================================================
@@ -930,8 +934,43 @@ PCT_FMT = '0.0"%"'
 CHART_COLORS = {"on_time": "2E7D32", "late": "F9A825", "unknown": "90A4AE",
                 "missed": "C62828", "open": "1565C0", "generated": "1A2E5A",
                 "completed": "2E7D32", "remaining": "ED7D31"}
-_LEVEL_FOR_STATUS = {ST_ON_TIME: "ok", ST_LATE: "medium", ST_UNKNOWN: "muted",
-                     ST_OPEN: "info", ST_MISSED: "high"}
+
+# Dashboard scorecard ROW tint (presentation only), by group status: a lighter
+# shade of the Status chip colour — On track = green, Watch = amber, Behind = red,
+# No tasks = grey.
+ROW_TINT = {"ok": "EDF7F0", "medium": "FFF4E3", "info": "EAF2FC", "high": "FDEBEB",
+            "muted": "F3F3F3"}
+
+
+def _row_tint(level, fallback):
+    """Background for a data row of the given status level (fallback = the
+    usual zebra shade when the status has no level)."""
+    return ROW_TINT.get(level, fallback)
+
+
+# ── Task-level rows (Task Register): Green / Orange / Red by severity ──────────
+# Presentation only — derived from the task's EXISTING status and Days on List:
+#   completed  (green)  Completed on time / Completed late / Completed (time not recorded)
+#   attention  (orange) Open (due today) — still within its report day
+#   urgent     (red)    Missed (report day over, not done), or still open while the
+#                       same item has been pending CARRIED_DAYS+ consecutive report
+#                       days (the existing "Pending 2+ Days" rule, see summarise())
+CARRIED_DAYS = 2                    # = the Pending 2+ Days / Days on List highlight rule
+TASK_ROW_COLORS = {                 # row background, chip background, chip / accent text
+    "completed": ("E3F2E6", "C8E6C9", "1B5E20"),
+    "attention": ("FFEBD2", "FFD49E", "8A4500"),
+    "urgent":    ("FBDADA", "F4B4B4", "9B1C1C"),
+}
+
+
+def _task_severity(t) -> str:
+    """'completed' | 'attention' | 'urgent' for row colouring (no logic change:
+    reads the status and Days on List the ledger already computed)."""
+    if t["completed"]:
+        return "completed"
+    if t["status"] == ST_MISSED or t.get("days_on_list", 0) >= CARRIED_DAYS:
+        return "urgent"
+    return "attention"
 
 
 def _hdr(ws, row, headers, col0=1, height=30):
@@ -979,9 +1018,10 @@ def _kpi_tiles(ws, row, tiles, span=2):
         c1 = c0 + span - 1
         bg, fg = BC.ds_level_colors(level)
         for r, (val, size, bold, color, h) in enumerate(
-                [(label, 9, True, BC.DS_MUTED, 18), (value, 20, True, fg, 34),
+                [(label, 9, True, BC.DS_MUTED, 26), (value, 20, True, fg, 34),
                  (note, 8, False, BC.DS_MUTED, 26)]):
-            ws.merge_cells(start_row=row + r, start_column=c0, end_row=row + r, end_column=c1)
+            if c1 > c0:
+                ws.merge_cells(start_row=row + r, start_column=c0, end_row=row + r, end_column=c1)
             cell = ws.cell(row=row + r, column=c0)
             cell.value = val
             cell.font = AR._font(bold=bold, size=size, color=color)
@@ -1058,60 +1098,26 @@ def _group_rows(ledger, tasks):
     return out
 
 
-def _assessment(total, grows, tasks, is_daily):
-    """Plain-language summary lines for management (only facts from the data)."""
-    lines = []
-    if not total["tasks"]:
-        return ["No trackable Coordinator tasks were generated in this period."]
-    lines.append(
-        f"{total['completed']} of {total['tasks']} tasks completed "
-        f"({total['completion_pct']:.1f}%); {total['pending']} pending"
-        + (f" — {total['open']} still open today, {total['missed']} missed" if total["open"] or total["missed"] else "")
-        + ".")
-    if total["timed_den"]:
-        lines.append(
-            f"Timeliness: {total['on_time']} of {total['timed_den']} tasks were completed on their "
-            f"report day (Timely Completion {total['timely_pct']:.1f}%)"
-            + (f"; {total['on_time']} of {total['on_time'] + total['late']} timed completions were on time"
-               if total["late"] else "")
-            + (f"; median time from generation to completion {_fmt_hours(total['median_ttc'])}"
-               if total["median_ttc"] is not None else "") + ".")
-    busy = [g for g in grows if g[2]["pending"]]
-    if busy:
-        gk, meta, s = max(busy, key=lambda x: (x[2]["pending"], x[2]["pending_pct"] or 0))
-        lines.append(f"Highest pending workload: {meta['name']} — {s['pending']} of {s['tasks']} "
-                     f"tasks pending ({s['pending_pct']:.1f}%).")
-    delayed = [g for g in grows if g[2]["late"] + g[2]["missed"]]
-    if delayed:
-        gk, meta, s = max(delayed, key=lambda x: x[2]["late"] + x[2]["missed"])
-        lines.append(f"Most delayed: {meta['name']} — {s['late']} completed late, {s['missed']} missed.")
-    stamps = sorted(t["completed_at"] for t in tasks if t["completed_at"])
-    if stamps and is_daily:
-        prof = completion_hour_profile(tasks)
-        peak = max(prof, key=lambda r: r["count"])
-        lines.append(f"Pace: completions recorded between {stamps[0].strftime('%I:%M %p')} and "
-                     f"{stamps[-1].strftime('%I:%M %p')}; busiest hour {peak['label']} "
-                     f"({peak['count']} of {len(stamps)}, {peak['pct']:.0f}%).")
-    elif stamps:
-        active = len({s.date() for s in stamps})
-        days = len({t["day"] for t in tasks})
-        lines.append(f"Consistency: completions were recorded on {active} of the {days} report "
-                     f"day(s) in this period.")
-    if total["carried"]:
-        lines.append(f"Accumulation: {total['carried']} pending task(s) have been on the list for "
-                     f"2 or more consecutive report days without completion.")
-    return lines
+# Dashboard grid: one column per scorecard column; the KPI tiles sit one per
+# column on the same grid, so tiles, scorecard and attention list share edges.
+DASH_COLS = ["Task Group", "Tasks", "Completed", "Pending", "Completion %", "Pending %", "Status"]
+DASH_WIDTHS = [38, 19, 19, 19, 19, 19, 19]
 
 
-def build_dashboard(ws, ledger, tasks, period_label, is_daily, cov_rows, now):
-    NC = 16
+def build_dashboard(ws, ledger, tasks, period_label, is_daily, now):
+    NC = len(DASH_COLS)
     total = summarise(tasks)
     BC.ds_title(ws, NC, "Task Performance Dashboard", period_label,
                 "Coordinator task completion and timeliness, overall and per task group. "
                 "On time = completed on the task's report day (IST). Timely % = On time ÷ "
-                "every task with a measurable time (open tasks count as not yet on time). Status bands: On track ≥ 75%, Watch ≥ 45%, Behind < 45% "
+                "every task with a measurable time (open tasks count as not yet on time). "
+                "Status bands: On track ≥ 75%, Watch ≥ 45%, Behind < 45% "
                 f"(worse of Completion % and Timely %).   As of {now.strftime('%d-%b-%Y %I:%M %p')} IST.")
+    for i, w in enumerate(DASH_WIDTHS, 1):              # widths first: the guide fit uses them
+        ws.column_dimensions[_gcl(i)].width = w
     row = 4
+
+    # ── Overall coordinator performance (7 tiles, one per grid column) ──────
     st = total["status"]
     row = BC.ds_section(ws, row, NC, f"OVERALL COORDINATOR PERFORMANCE   ·   {st}", level=1)
     lvl_c = _status_level(_status_word(total["completion_pct"]))
@@ -1120,185 +1126,149 @@ def build_dashboard(ws, ledger, tasks, period_label, is_daily, cov_rows, now):
         ("Tasks Generated", total["tasks"], f"{total['unique_items']} unique item(s)", "none", None),
         ("Completed", total["completed"],
          f"{total['on_time']} on time · {total['late']} late · {total['unknown']} no time", "ok", None),
-        ("Pending", total["pending"], f"{total['open']} open today · {total['missed']} missed",
+        ("Pending", total["pending"], "not completed yet",
          "high" if total["pending"] else "ok", None),
         ("Completion %", round(total["completion_pct"], 1) if total["completion_pct"] is not None else "—",
          f"Pending {total['pending_pct']:.1f}%" if total["pending_pct"] is not None else "",
          lvl_c, PCT_FMT),
         ("Timely Completion %", round(total["timely_pct"], 1) if total["timely_pct"] is not None else "—",
-         f"{total['on_time']} of {total['timed_den']} tasks done on their day" if total["timed_den"] else "no timed tasks",
+         f"{total['on_time']} of {total['timed_den']} done on their day" if total["timed_den"] else "no timed tasks",
          lvl_t, PCT_FMT),
         ("Median Time to Complete", _fmt_hours(total["median_ttc"]),
          "generation → Done (on-time tasks)", "info", None),
-        ("Missed (Overdue)", total["missed"], "not done on the report day",
-         "high" if total["missed"] else "ok", None),
         (("Attempted, Not Done", total["attempted"], "Done? = No / note, not completed",
           "medium" if total["attempted"] else "ok", None) if is_daily else
          ("Pending 2+ Days", total["carried"], "same item, consecutive report days in period",
           "medium" if total["carried"] else "ok", None)),
     ]
-    row = _kpi_tiles(ws, row, tiles) + 1
-
-    row = BC.ds_section(ws, row, NC, "ASSESSMENT", level=2)
-    grows = _group_rows(ledger, tasks)
-    for line in _assessment(total, grows, tasks, is_daily):
-        row = _note(ws, row, NC, "•  " + line, italic=False, size=10, color=BC.DS_TEXT)
-    row += 1
+    row = _kpi_tiles(ws, row, tiles, span=1) + 1
 
     # ── Task group scorecard ───────────────────────────────────────────────
+    grows = _group_rows(ledger, tasks)
     row = BC.ds_section(ws, row, NC, "TASK GROUP SCORECARD", level=1)
-    heads = ["Task Group", "Tasks", "Completed", "Pending", "Completion %", "Pending %",
-             "Timely %", "Status", "On Time", "Late", "Done, No Time", "Missed", "Open Today",
-             "Median Time to Complete", "Unique Items", "Pending 2+ Days"]
     hdr_row = row
-    row = _hdr(ws, row, heads, height=32)
+    row = _hdr(ws, row, DASH_COLS, height=30)
     first = row
     for i, (gk, meta, s) in enumerate(grows):
-        bg = BC.ds_zebra(i)
+        bg = _row_tint(_status_level(s["status"]) if s["tasks"] else "muted", BC.ds_zebra(i))
         BC.ds_priority(ws, row, 1, meta["name"], _status_level(s["status"]) if s["tasks"] else "muted",
                        h_align="left")
         for col, v in ((2, s["tasks"]), (3, s["completed"]), (4, s["pending"])):
             BC.ds_cell(ws, row, col, v, bg=bg, h_align="center", bold=(col == 4 and v > 0),
                        fg=(BC.DS_HIGH_FG if col == 4 and v > 0 else BC.DS_TEXT))
-        _pct_cell(ws, row, 5, s["completion_pct"], bold=True)
+        _pct_cell(ws, row, 5, s["completion_pct"], bg=bg, bold=True)   # bg only used for "—"
         _pct_cell(ws, row, 6, s["pending_pct"], bg=bg, level_by_status=False)
-        _pct_cell(ws, row, 7, s["timely_pct"], bold=True)
-        BC.ds_pill(ws, row, 8, s["status"] if s["tasks"] else "No tasks",
+        BC.ds_pill(ws, row, 7, s["status"] if s["tasks"] else "No tasks",
                    _status_level(s["status"]) if s["tasks"] else "muted")
-        for col, v in ((9, s["on_time"]), (10, s["late"]), (11, s["unknown"]),
-                       (12, s["missed"]), (13, s["open"])):
-            BC.ds_cell(ws, row, col, v, bg=bg, h_align="center")
-        BC.ds_cell(ws, row, 14, _fmt_hours(s["median_ttc"]), bg=bg, h_align="center")
-        BC.ds_cell(ws, row, 15, s["unique_items"], bg=bg, h_align="center")
-        BC.ds_cell(ws, row, 16, s["carried"], bg=bg, h_align="center", bold=s["carried"] > 0,
-                   fg=(BC.DS_MED_FG if s["carried"] else BC.DS_TEXT))
+        ws.row_dimensions[row].height = 20
         row += 1
     last = row - 1
-    # total row
-    tb = BC.DS_SUB
+    tb = BC.DS_SUB                                       # total row
     BC.ds_cell(ws, row, 1, "All task groups", bg=tb, bold=True)
-    for col, v in ((2, total["tasks"]), (3, total["completed"]), (4, total["pending"]),
-                   (9, total["on_time"]), (10, total["late"]), (11, total["unknown"]),
-                   (12, total["missed"]), (13, total["open"]), (15, total["unique_items"]),
-                   (16, total["carried"])):
+    for col, v in ((2, total["tasks"]), (3, total["completed"]), (4, total["pending"])):
         BC.ds_cell(ws, row, col, v, bg=tb, bold=True, h_align="center")
     _pct_cell(ws, row, 5, total["completion_pct"], bold=True)
     _pct_cell(ws, row, 6, total["pending_pct"], bg=tb, bold=True, level_by_status=False)
-    _pct_cell(ws, row, 7, total["timely_pct"], bold=True)
-    BC.ds_pill(ws, row, 8, total["status"], _status_level(total["status"]))
-    BC.ds_cell(ws, row, 14, _fmt_hours(total["median_ttc"]), bg=tb, bold=True, h_align="center")
-    row += 2
+    BC.ds_pill(ws, row, 7, total["status"], _status_level(total["status"]))
+    ws.row_dimensions[row].height = 22
+    row += 2                                             # one spacer row
 
-    # ── Needs management attention ─────────────────────────────────────────
-    row = BC.ds_section(ws, row, NC, "NEEDS MANAGEMENT ATTENTION", level=1)
-    attn = []
-    for gk, meta, s in grows:
-        if s["tasks"] and s["status"] == "Behind":
-            attn.append(("high", f"{meta['name']}: completion "
-                         f"{s['completion_pct']:.1f}%, timely "
-                         + (f"{s['timely_pct']:.1f}%" if s["timely_pct"] is not None else "n/a")
-                         + " — Behind."))
-    for gk, meta, s in grows:
-        if s["missed"]:
-            attn.append(("high", f"{meta['name']}: {s['missed']} task(s) missed (report day over, not done)."))
-    carried = sorted([t for t in tasks if not t["completed"] and t.get("days_on_list", 0) >= 2],
-                     key=lambda t: -t["days_on_list"])
-    for t in carried[:5]:
-        attn.append(("medium", f"{ledger['groups'][t['group']]['name']}: {t['label']} — pending on "
-                     f"{t['days_on_list']} consecutive report days."))
-    if len(carried) > 5:
-        attn.append(("medium", f"… and {len(carried) - 5} more item(s) pending 2+ days "
-                     f"(see 'Pending & Overdue')."))
-    if total["open"]:
-        attn.append(("info", f"{total['open']} task(s) still open today — due by 11:59 PM."))
-    if total["no_action"]:
-        attn.append(("info", f"{total['no_action']} task(s) marked Done without an Action Taken "
-                     f"recorded (evidence gap)."))
-    untracked = sum(c["untracked_tasks"] for c in cov_rows)
-    no_time = sum(c["yes_no_time"] for c in cov_rows)
-    if untracked:
-        attn.append(("muted", f"{untracked} task(s) in this period came from report versions without "
-                     f"follow-up columns and cannot be scored (see 'Data Coverage & Rules')."))
-    if no_time:
-        attn.append(("muted", f"{no_time} completed task(s) have no valid Follow-Up DateTime "
-                     f"(e.g. #REF!) — counted as completed, excluded from timeliness."))
-    if not attn:
-        row = BC.ds_empty(ws, row, NC, "✅  Nothing needs management attention in this period.")
-    for level, text in attn:
-        bg, fg = BC.ds_level_colors(level)
-        BC.ds_cell(ws, row, 1, {"high": "Act", "medium": "Watch", "info": "Info",
-                                "muted": "Data"}.get(level, ""), bg=bg, fg=fg, bold=True,
-                   h_align="center", left_accent=fg)
-        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=NC)
-        BC.ds_cell(ws, row, 2, text, wrap=True)
-        for cc in range(3, NC + 1):
-            ws.cell(row=row, column=cc).border = BC.ds_border()
-        ws.row_dimensions[row].height = 20
-        row += 1
-    row += 1
-
-    # ── Chart: task outcome by group (data = the scorecard's visible columns) ──
+    # ── Chart: completed vs pending per task group (scorecard columns C:D) ──
     if grows and total["tasks"]:
+        row = BC.ds_section(ws, row, NC, "COMPLETED VS PENDING BY TASK GROUP", level=2)
         cats = Reference(ws, min_col=1, min_row=first, max_row=last)
-        series = [(Reference(ws, min_col=c, min_row=hdr_row, max_row=last), col)
-                  for c, col in ((9, CHART_COLORS["on_time"]), (10, CHART_COLORS["late"]),
-                                 (11, CHART_COLORS["unknown"]), (12, CHART_COLORS["missed"]),
-                                 (13, CHART_COLORS["open"]))]
-        row = BC.ds_section(ws, row, NC, "TASK OUTCOME BY GROUP", level=2)
-        _bar_chart(ws, "Tasks by outcome — per task group", cats, series, f"A{row + 1}",
-                   stacked=True, horizontal=True, height=8, width=30, y_title="Tasks")
-    widths = [34, 8, 11, 9, 12, 10, 10, 11, 9, 8, 10, 9, 10, 14, 10, 11]
-    for i, w in enumerate(widths, 1):
-        ws.column_dimensions[_gcl(i)].width = w
+        series = [(Reference(ws, min_col=3, min_row=hdr_row, max_row=last), CHART_COLORS["completed"]),
+                  (Reference(ws, min_col=4, min_row=hdr_row, max_row=last), CHART_COLORS["remaining"])]
+        anchor, row = _chart_below(ws, row, 7.5)          # thin spacer, then the chart
+        _bar_chart(ws, "Completed vs Pending — per task group", cats, series, anchor,
+                   stacked=True, horizontal=True, height=7.5,
+                   width=round(_grid_width_cm(DASH_WIDTHS) - 0.4, 1), y_title="Tasks")
     BC.ds_fit_guide(ws, NC)
     ws.freeze_panes = "A3"
     ws.sheet_view.showGridLines = False
     ws.sheet_view.zoomScale = 90
     ws.sheet_properties.tabColor = BC.DS_NAV
+    try:
+        ws.print_area = f"A1:{_gcl(NC)}{row}"
+    except Exception:                                    # pragma: no cover
+        pass
     return ws
 
 
-def build_trend(ws, ledger, tasks, period_label, days, is_daily, now):
+# Progress Trend grid: 10 columns (the day-wise table uses all of them); every
+# chart sits directly under its table, within this grid.
+TREND_WIDTHS = [26, 14, 13, 14, 12, 11, 11, 13, 11, 12]
+TREND_ROW_PT = 15          # fixed height of the rows a chart below a table occupies
+
+
+def _grid_width_cm(widths):
+    """Width of a run of columns in cm (Excel: ~7 px per character + 5 px padding)."""
+    return sum(w * 7 + 5 for w in widths) / 37.8
+
+
+def _chart_below(ws, row, height_cm):
+    """Reserve the rows under a table for a chart of `height_cm` (a thin spacer
+    row first) and return (anchor cell, next free row after the chart)."""
+    ws.row_dimensions[row].height = 6
+    n = -(-int(height_cm * 28.35) // TREND_ROW_PT) + 1       # cm → pt → rows, +1 margin
+    for r in range(row + 1, row + 1 + n):
+        ws.row_dimensions[r].height = TREND_ROW_PT
+    return f"A{row + 1}", row + 1 + n
+
+
+def build_trend(ws, ledger, tasks, period_label, days, is_daily, now, period_text=None):
+    """Progress Trend tab.
+    1. WITHIN-DAY PROGRESS — <report day / period>: Generated vs Completed vs
+       Open hour by hour (table, chart directly underneath). Daily = that day;
+       Weekly / Monthly / Manual = the period's report days combined by hour.
+    2. (periods only) DAY-WISE PROGRESS and COMPLETION % BY TASK GROUP AND DAY."""
     NC = 10
     BC.ds_title(ws, NC, "Task Progress Trend", period_label,
                 ("Within-day pace: tasks generated vs completed (cumulative) and still open, hour by "
                  "hour (IST). " if is_daily else
-                 "Day by day: how each report day's tasks ended — on time, late, missed or open — "
-                 "and the completion / timely % trend. ")
+                 "Within-day pace for the period's report days combined (hour of day, IST), then day "
+                 "by day: how each report day's tasks ended — on time, late, missed or open — and "
+                 "the completion / timely % trend. ")
                 + "Completions without a valid Follow-Up DateTime are counted as completed but "
                   "cannot be placed on a time axis.")
     row = 4
-    chart_col = "L"
+    for i, w in enumerate(TREND_WIDTHS, 1):
+        ws.column_dimensions[_gcl(i)].width = w
 
-    if is_daily:
-        d = days[-1] if days else None
-        hp = hourly_progress(tasks, d, now) if d else []
-        row = BC.ds_section(ws, row, NC, f"WITHIN-DAY PROGRESS — {d.strftime('%d-%b-%Y') if d else ''}",
-                            level=1)
-        if not hp:
-            row = BC.ds_empty(ws, row, NC, "No trackable tasks on this report day.", level="muted") + 1
-        else:
-            h0 = row
-            row = _hdr(ws, row, ["Hour (IST)", "Tasks Generated (cumulative)", "Completed in Hour",
-                                 "Completed (cumulative)", "Open", "Completion %"])
-            f0 = row
-            for i, r in enumerate(hp):
-                bg = BC.ds_zebra(i)
-                BC.ds_cell(ws, row, 1, r["label"], bg=bg, h_align="center", bold=True)
-                for c, v in ((2, r["generated"]), (3, r["completed_in_hour"]), (4, r["completed"]),
-                             (5, r["open"])):
-                    BC.ds_cell(ws, row, c, v, bg=bg, h_align="center")
-                _pct_cell(ws, row, 6, _pct(r["completed"], r["generated"]), bg=bg,
-                          level_by_status=False)
-                row += 1
-            cats = Reference(ws, min_col=1, min_row=f0, max_row=row - 1)
-            _line_chart(ws, "Generated vs Completed vs Open — hour by hour", cats,
-                        [(Reference(ws, min_col=2, min_row=h0, max_row=row - 1), CHART_COLORS["generated"]),
-                         (Reference(ws, min_col=4, min_row=h0, max_row=row - 1), CHART_COLORS["completed"]),
-                         (Reference(ws, min_col=5, min_row=h0, max_row=row - 1), CHART_COLORS["remaining"])],
-                        f"{chart_col}{h0}", y_title="Tasks", width=18)
-            row = max(row, h0 + 16) + 1
+    # ── 1. within-day progress: hour-by-hour table + chart directly below ──
+    when = period_text or (days[-1].strftime("%d-%b-%Y") if days else "")
+    hp = hourly_progress(tasks, days, now) if days else []
+    row = BC.ds_section(ws, row, NC, f"WITHIN-DAY PROGRESS — {when}" + (
+        "" if is_daily else "  (all report days combined, by hour of day)"), level=1)
+    if not hp:
+        row = BC.ds_empty(ws, row, NC, "No trackable tasks on this report day." if is_daily else
+                          "No trackable tasks in this period.", level="muted") + 1
     else:
+        h0 = row
+        row = _hdr(ws, row, ["Hour (IST)", "Tasks Generated (cumulative)", "Completed in Hour",
+                             "Completed (cumulative)", "Open", "Completion %"])
+        f0 = row
+        for i, r in enumerate(hp):
+            bg = BC.ds_zebra(i)
+            BC.ds_cell(ws, row, 1, r["label"], bg=bg, h_align="center", bold=True)
+            for c, v in ((2, r["generated"]), (3, r["completed_in_hour"]), (4, r["completed"]),
+                         (5, r["open"])):
+                BC.ds_cell(ws, row, c, v, bg=bg, h_align="center")
+            _pct_cell(ws, row, 6, _pct(r["completed"], r["generated"]), bg=bg,
+                      level_by_status=False)
+            row += 1
+        cats = Reference(ws, min_col=1, min_row=f0, max_row=row - 1)
+        height = 7.5
+        anchor, row = _chart_below(ws, row, height)
+        _line_chart(ws, "Generated vs Completed vs Open — hour by hour", cats,
+                    [(Reference(ws, min_col=2, min_row=h0, max_row=f0 + len(hp) - 1), CHART_COLORS["generated"]),
+                     (Reference(ws, min_col=4, min_row=h0, max_row=f0 + len(hp) - 1), CHART_COLORS["completed"]),
+                     (Reference(ws, min_col=5, min_row=h0, max_row=f0 + len(hp) - 1), CHART_COLORS["remaining"])],
+                    anchor, y_title="Tasks", height=height,
+                    width=round(_grid_width_cm(TREND_WIDTHS) - 0.4, 1))
+
+    # ── 2. periods: day-wise outcome + task-group completion by day ────────
+    if not is_daily:
         dp = daywise_progress(tasks, days)
         row = BC.ds_section(ws, row, NC, "DAY-WISE PROGRESS", level=1)
         if not dp:
@@ -1318,16 +1288,23 @@ def build_trend(ws, ledger, tasks, period_label, days, is_daily, now):
                 _pct_cell(ws, row, 9, r["timely_pct"])
                 BC.ds_cell(ws, row, 10, r["carried"], bg=bg, h_align="center")
                 row += 1
-            cats = Reference(ws, min_col=1, min_row=f0, max_row=row - 1)
+            last = row - 1
+            cats = Reference(ws, min_col=1, min_row=f0, max_row=last)
+            # both charts directly under the table, side by side on the same grid:
+            # outcome bars across columns A–E, the % trend across F–J
+            height = 7.5
+            anchor, row = _chart_below(ws, row, height)
+            split = 5
             _bar_chart(ws, "Each report day's tasks by outcome", cats,
-                       [(Reference(ws, min_col=c, min_row=h0, max_row=row - 1), CHART_COLORS[k])
+                       [(Reference(ws, min_col=c, min_row=h0, max_row=last), CHART_COLORS[k])
                         for c, k in ((3, "on_time"), (4, "late"), (5, "unknown"), (6, "missed"), (7, "open"))],
-                       f"{chart_col}{h0}", stacked=True, y_title="Tasks", width=18)
+                       anchor, stacked=True, y_title="Tasks", height=height,
+                       width=round(_grid_width_cm(TREND_WIDTHS[:split]) - 0.3, 1))
             _line_chart(ws, "Completion % and Timely % by report day", cats,
-                        [(Reference(ws, min_col=8, min_row=h0, max_row=row - 1), CHART_COLORS["completed"]),
-                         (Reference(ws, min_col=9, min_row=h0, max_row=row - 1), CHART_COLORS["open"])],
-                        f"V{h0}", y_title="%", width=18)
-            row = max(row, h0 + 16) + 1
+                        [(Reference(ws, min_col=8, min_row=h0, max_row=last), CHART_COLORS["completed"]),
+                         (Reference(ws, min_col=9, min_row=h0, max_row=last), CHART_COLORS["open"])],
+                        f"{_gcl(split + 1)}{anchor[1:]}", y_title="%", height=height,
+                        width=round(_grid_width_cm(TREND_WIDTHS[split:]) - 0.4, 1))
 
             # task-group completion % by day (which category is slipping)
             row = BC.ds_section(ws, row, NC, "COMPLETION % BY TASK GROUP AND DAY", level=1)
@@ -1342,56 +1319,7 @@ def build_trend(ws, ledger, tasks, period_label, days, is_daily, now):
                 row += 1
             if len(days) > 9:
                 row = _note(ws, row, NC, f"Showing the latest 9 of {len(days)} report days.")
-            row += 1
 
-    # ── when work is completed / how quickly ──────────────────────────────
-    prof = completion_hour_profile(tasks)
-    row = BC.ds_section(ws, row, NC, "WHEN ARE TASKS COMPLETED?  (completions by hour of day, IST)",
-                        level=1)
-    if not prof:
-        row = BC.ds_empty(ws, row, NC, "No completions with a valid Follow-Up DateTime yet.",
-                          level="muted") + 1
-    else:
-        h0 = row
-        row = _hdr(ws, row, ["Hour (IST)", "Completions", "% of Completions"])
-        f0 = row
-        for i, r in enumerate(prof):
-            bg = BC.ds_zebra(i)
-            BC.ds_cell(ws, row, 1, r["label"], bg=bg, h_align="center", bold=True)
-            BC.ds_cell(ws, row, 2, r["count"], bg=bg, h_align="center")
-            _pct_cell(ws, row, 3, r["pct"], bg=bg, level_by_status=False)
-            row += 1
-        _bar_chart(ws, "Completions by hour of day", Reference(ws, min_col=1, min_row=f0, max_row=row - 1),
-                   [(Reference(ws, min_col=2, min_row=h0, max_row=row - 1), CHART_COLORS["completed"])],
-                   f"{chart_col}{h0}", stacked=False, y_title="Completions", width=18, height=6.5)
-        row = max(row, h0 + 14) + 1
-
-    tp = ttc_profile(tasks)
-    row = BC.ds_section(ws, row, NC, "HOW QUICKLY ARE TASKS COMPLETED?  (from generation to Done)",
-                        level=1)
-    if not sum(r["count"] for r in tp):
-        row = BC.ds_empty(ws, row, NC, "No timed completions yet.", level="muted") + 1
-    else:
-        h0 = row
-        row = _hdr(ws, row, ["Time to Complete", "Tasks", "% of Timed Completions"])
-        f0 = row
-        for i, r in enumerate(tp):
-            bg = BC.ds_zebra(i)
-            late = r["label"].startswith("Completed on a later day")
-            BC.ds_cell(ws, row, 1, r["label"], bg=(BC.DS_MED_BG if late and r["count"] else bg), bold=True)
-            BC.ds_cell(ws, row, 2, r["count"], bg=bg, h_align="center")
-            _pct_cell(ws, row, 3, r["pct"], bg=bg, level_by_status=False)
-            row += 1
-        _bar_chart(ws, "Time from generation to completion", Reference(ws, min_col=1, min_row=f0, max_row=row - 1),
-                   [(Reference(ws, min_col=2, min_row=h0, max_row=row - 1), CHART_COLORS["open"])],
-                   f"{chart_col}{h0}", stacked=False, y_title="Tasks", width=18, height=6.5,
-                   horizontal=True)
-        row = max(row, h0 + 14) + 1
-
-    widths = [26, 14, 13, 14, 12, 11, 11, 13, 11, 12]
-    for i, w in enumerate(widths, 1):
-        ws.column_dimensions[_gcl(i)].width = w
-    ws.column_dimensions["K"].width = 3
     BC.ds_fit_guide(ws, NC)
     ws.freeze_panes = "A3"
     ws.sheet_view.showGridLines = False
@@ -1405,11 +1333,14 @@ REG_COLS = ["Report Day", "Task Group", "Item", "Context", "What Was Flagged", "
             "Days on List", "Seen in Versions", "Recorded in Versions"]
 
 
-def _task_row(ws, row, t, cols, groups, zebra):
-    bg = BC.ds_zebra(zebra)
+def _task_row(ws, row, t, cols, groups):
+    # whole row coloured by severity (green / orange / red); the Status chip is a
+    # stronger shade of the same colour and column 1 carries a coloured left edge
+    bg, chip_bg, accent = TASK_ROW_COLORS[_task_severity(t)]
     for c, name in enumerate(cols, 1):
         if name == "Status":
-            BC.ds_pill(ws, row, c, t["status"], _LEVEL_FOR_STATUS.get(t["status"], "none"))
+            BC.ds_cell(ws, row, c, t["status"], bg=chip_bg, fg=accent, bold=True, h_align="center",
+                       left_accent=accent if c == 1 else None)
             continue
         v = {
             "Report Day": t["day"].strftime("%d-%b-%Y"),
@@ -1420,50 +1351,19 @@ def _task_row(ws, row, t, cols, groups, zebra):
                             ("time not recorded" if t["completed"] else "—"),
             "Time to Complete": _fmt_hours(t["ttc_h"]),
             "Action Taken": t["action"] or "—", "Follow-Up Comment": t["comment"] or "—",
-            "Last Action Taken": t["action"] or "—", "Last Comment": t["comment"] or "—",
             "Days on List": t.get("days_on_list", 0) or "—",
-            "Attempted?": "Yes" if t["attempted"] else "No",
             "Seen in Versions": ", ".join(f"V{x}" for x in t["versions_seen"]) or "—",
             "Recorded in Versions": ", ".join(f"V{x}" for x in t["versions_recorded"]) or "—",
         }.get(name, "")
-        wrap = name in ("Item", "Context", "What Was Flagged", "Follow-Up Comment", "Last Comment")
+        wrap = name in ("Item", "Context", "What Was Flagged", "Follow-Up Comment")
         bold = name == "Item"
         fg = BC.DS_TEXT
         if name == "Days on List" and isinstance(v, int) and v >= 2:
             fg = BC.DS_HIGH_FG
             bold = True
         BC.ds_cell(ws, row, c, v, bg=bg, wrap=wrap, bold=bold, fg=fg,
-                   h_align="left" if wrap or name in ("Task Group",) else "center")
-
-
-def build_pending(ws, ledger, tasks, period_label):
-    cols = ["Status", "Task Group", "Report Day", "Item", "Context", "What Was Flagged", "Generated At",
-            "Days on List", "Attempted?", "Last Action Taken", "Last Comment"]
-    NC = len(cols)
-    pend = [t for t in tasks if not t["completed"]]
-    pend.sort(key=lambda t: (t["status"] != ST_MISSED, -t.get("days_on_list", 0), t["day"],
-                             list(ledger["groups"]).index(t["group"]), t["label"]))
-    BC.ds_title(ws, NC, "Pending & Overdue Tasks", period_label,
-                "Every task of this period not completed: Missed (report day over) first, then Open "
-                "(due today). Days on List = consecutive report days IN THIS PERIOD the same item "
-                "has been listed without completion — the accumulation signal.")
-    BC.ds_guide_count(ws, "Pending tasks", len(pend))
-    row = _hdr(ws, 3, cols)
-    if not pend:
-        BC.ds_empty(ws, row, NC, "✅  No pending tasks in this period.")
-    for i, t in enumerate(pend):
-        _task_row(ws, row, t, cols, ledger["groups"], i)
-        ws.row_dimensions[row].height = 32
-        row += 1
-    for c, w in enumerate([18, 16, 12, 28, 40, 46, 15, 9, 14, 16, 30], 1):
-        ws.column_dimensions[_gcl(c)].width = w
-    BC.ds_fit_guide(ws, NC)
-    ws.auto_filter.ref = f"A3:{_gcl(NC)}{max(row - 1, 3)}"
-    ws.freeze_panes = "B4"
-    ws.sheet_view.showGridLines = False
-    ws.sheet_view.zoomScale = 90
-    ws.sheet_properties.tabColor = BC.DS_HIGH_FG
-    return ws
+                   h_align="left" if wrap or name in ("Task Group",) else "center",
+                   left_accent=accent if c == 1 else None)
 
 
 def build_register(ws, ledger, tasks, period_label):
@@ -1471,12 +1371,16 @@ def build_register(ws, ledger, tasks, period_label):
     BC.ds_title(ws, NC, "Task Register (audit trail)", period_label,
                 "One row per task (report day × task group × item), merged across every version of "
                 "that day's Coordinator report. 'Seen in' = versions listing the task; 'Recorded in' "
-                "= versions where the Coordinator entered a follow-up.")
+                "= versions where the Coordinator entered a follow-up. Pending tasks: filter Status = "
+                "Missed / Open (due today); sort Days on List to see items carried across report days; "
+                "a pending task with 'Recorded in' filled was attempted but not done.   Row colour:  "
+                "■ Green = completed   ■ Orange = attention required (open, due today)   "
+                f"■ Red = overdue / urgent (missed, or pending {CARRIED_DAYS}+ consecutive report days).")
     BC.ds_guide_count(ws, "Tasks", len(tasks))
     row = _hdr(ws, 3, REG_COLS)
     order = list(ledger["groups"])
-    for i, t in enumerate(sorted(tasks, key=lambda t: (t["day"], order.index(t["group"]), t["label"]))):
-        _task_row(ws, row, t, REG_COLS, ledger["groups"], i)
+    for t in sorted(tasks, key=lambda t: (t["day"], order.index(t["group"]), t["label"])):
+        _task_row(ws, row, t, REG_COLS, ledger["groups"])
         ws.row_dimensions[row].height = 32
         row += 1
     if not tasks:
@@ -1576,9 +1480,10 @@ def build_workbook(ledger, start: date, end: date, period_label: str, is_daily: 
     cov = ledger["coverage"]
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
-    build_dashboard(wb.create_sheet("Dashboard"), ledger, tasks, period_label, is_daily, cov, now)
-    build_trend(wb.create_sheet("Progress Trend"), ledger, tasks, period_label, days, is_daily, now)
-    build_pending(wb.create_sheet("Pending & Overdue"), ledger, tasks, period_label)
+    build_dashboard(wb.create_sheet("Dashboard"), ledger, tasks, period_label, is_daily, now)
+    build_trend(wb.create_sheet("Progress Trend"), ledger, tasks, period_label, days, is_daily, now,
+                period_text=(start.strftime("%d-%b-%Y") if start == end else
+                             f"{start.strftime('%d-%b-%Y')} to {end.strftime('%d-%b-%Y')}"))
     build_register(wb.create_sheet("Task Register"), ledger, tasks, period_label)
     build_coverage(wb.create_sheet("Data Coverage & Rules"), cov, period_label)
     for ws in wb.worksheets:                          # print: landscape, one page wide
@@ -1611,11 +1516,12 @@ def _file_name(job) -> str:
     return f"{REPORT_BASENAME}_{job['kind']}_{safe}"
 
 
-def run_jobs(jobs, versions, loader, now, upload=None, save_dir=None):
+def run_jobs(jobs, versions, loader, now, upload=None):
     """Build (and deliver) one workbook per job. The ledger is built once from
     the discovered versions; every job is then scoped to its own period
     (scope_ledger), so jobs never borrow each other's tasks. A failing job is
-    recorded and the remaining jobs still run."""
+    recorded and the remaining jobs still run. Each workbook exists only in
+    memory and is uploaded from there — nothing is written to local disk."""
     ledger = build_ledger(versions, loader, now)
     log.info("Ledger: %d trackable task(s) across %d report day(s).",
              len(ledger["tasks"]), len({t["day"] for t in ledger["tasks"]}))
@@ -1629,17 +1535,13 @@ def run_jobs(jobs, versions, loader, now, upload=None, save_dir=None):
                                           f"{job['kind']}  ·  {job['label']}",
                                           job["kind"] == "Daily", now)
             out.update(summary=s, tasks=len(tasks))
-            buf = io.BytesIO()
+            _sc = scope_ledger(ledger, job["start"], job["end"])       # for the e-mail breakdown
+            out["groups"] = [(meta["name"], gs) for _gk, meta, gs in _group_rows(_sc, _sc["tasks"])]
+            buf = io.BytesIO()                  # in memory only — never written to disk
             wb.save(buf)
-            if save_dir:
-                local_dir = os.path.join(save_dir, *folders)
-                os.makedirs(local_dir, exist_ok=True)
-                path = os.path.join(local_dir, name + ".xlsx")
-                with open(path, "wb") as fh:
-                    fh.write(buf.getvalue())
-                out["local"] = path
             if upload:
                 out["link"] = upload(folders, name, buf)
+            buf.close()
         except Exception as exc:                                   # noqa: BLE001
             log.exception("Performance report %s %s failed: %s", job["kind"], job["label"], exc)
             out["failed"] = True
@@ -1653,15 +1555,48 @@ def run_jobs(jobs, versions, loader, now, upload=None, save_dir=None):
               f"(open {s['open']}, missed {s['missed']}) | Completion {pct(s['completion_pct'])} | "
               f"Timely {pct(s['timely_pct'])} | Status {s['status']}\n"
               f"  Folder: {out['folder']}\n"
-              + (f"  [Drive] Uploaded: {out['link']}\n" if out.get("link") else "")
-              + (f"  Local: {out['local']}\n" if out.get("local") else "") + "=" * 70)
+              + (f"  [Drive] Uploaded: {out['link']}\n" if out.get("link") else
+                 "  [Drive] upload OFF — built in memory only, nothing saved\n") + "=" * 70)
         results.append(out)
     return results
+
+
+def cleanup_legacy_local_copies(root=None) -> int:
+    """Remove report copies that earlier versions of this script saved under
+    output/reports/coordinator_performance/. Deletes ONLY this report's own
+    files (REPORT_BASENAME*.xlsx), then any folder left empty (including the
+    root itself); any other file — and the folders holding it — is kept.
+    Best-effort: a file that cannot be removed is logged and never fails the run.
+    Returns the number of files removed."""
+    root = root or LEGACY_OUTPUT_DIR
+    if not os.path.isdir(root):
+        return 0
+    removed = 0
+    for cur, _dirs, files in os.walk(root, topdown=False):
+        for f in files:
+            if f.startswith(REPORT_BASENAME) and f.lower().endswith(".xlsx"):
+                try:
+                    os.remove(os.path.join(cur, f))
+                    removed += 1
+                except OSError as exc:
+                    log.warning("Could not remove old local report copy %s (%s).",
+                                os.path.join(cur, f), exc)
+        try:
+            if not os.listdir(cur):
+                os.rmdir(cur)
+        except OSError as exc:
+            log.warning("Could not remove empty folder %s (%s).", cur, exc)
+    if removed:
+        log.info("Removed %d old local report cop%s from %s (reports are kept in "
+                 "Google Drive only).", removed, "y" if removed == 1 else "ies", root)
+        print(f"[Cleanup] removed {removed} old local report file(s) — reports live in Google Drive only.")
+    return removed
 
 
 def generate():
     """Plan → discover the period's daily task reports → build → deliver.
     Returns (results, errors)."""
+    cleanup_legacy_local_copies()       # first, so it happens even if a later step fails
     now = _now_ist()
     jobs, errors = _plan_jobs(now.date())
     for e in errors:
@@ -1681,27 +1616,56 @@ def generate():
         return BC.upload_report(folders, name + ".xlsx", buf, name)
 
     results = run_jobs(jobs, versions, lambda v: load_version(drive, v), now,
-                       upload=_upload if UPLOAD_TO_DRIVE else None,
-                       save_dir=OUTPUT_DIR if SAVE_LOCAL_COPY else None)
+                       upload=_upload if UPLOAD_TO_DRIVE else None)
+    email_results(results)
     return results, errors
+
+
+def email_results(results) -> bool | None:
+    """One e-mail per delivered report (same convention as the Sales lead
+    reports). Controlled ONLY by SEND_EMAIL — generation and the Drive upload
+    never depend on it. The e-mail carries the Google Sheet link, no attachment. Returns True (all sent), False (one or more
+    failed) or None (nothing to send / disabled)."""
+    done = [r for r in results if not r.get("failed")]
+    if not SEND_EMAIL:
+        print("[Email] SEND_EMAIL = False — report(s) generated, no e-mail sent.")
+        return None
+    if not done:
+        print("[Email] no report delivered in this run — nothing to e-mail.")
+        return None
+    ok = True
+    for r in done:
+        kind, label, s = r["job"]["kind"], r["job"]["label"], r["summary"]
+        subject = f"{kind} Coordinator Task Performance Report - {label}"
+        body = CE.performance_html(kind, label, s, r.get("groups", []), r.get("link"),
+                                   _fmt_hours(s["median_ttc"]), STATUS_ON_TRACK, STATUS_WATCH,
+                                   benchmark=COMPLETION_BENCHMARK,
+                                   group_labels=EMAIL_GROUP_LABELS)
+        ok = CE.send(subject, body, EMAIL_RECIPIENTS, sender=EMAIL_SENDER,
+                     star=STAR_EMAIL_IN_GMAIL) and ok
+    return ok
 
 
 def main(argv=None):
     """Command line (all optional — the flags above are the normal control):
-        --no-upload          build + save the local copy only (nothing written to Drive)
+        --no-upload          dry run: build in memory only (nothing written to Drive or disk)
+        --no-email           do not send the e-mail (same as SEND_EMAIL = False)
         --date YYYY-MM-DD    Daily report for that date instead of the planned jobs
         --from / --to        a custom period (Manual report)"""
     import argparse
-    global UPLOAD_TO_DRIVE, GENERATE_AUTO, GENERATE_DAILY, GENERATE_WEEKLY, GENERATE_MONTHLY
+    global UPLOAD_TO_DRIVE, SEND_EMAIL, GENERATE_AUTO, GENERATE_DAILY, GENERATE_WEEKLY, GENERATE_MONTHLY
     global GENERATE_MANUAL, DAILY_DATE, MANUAL_START_DATE, MANUAL_END_DATE
     ap = argparse.ArgumentParser(description="Coordinator Task Performance & Progress Report")
     ap.add_argument("--no-upload", action="store_true")
+    ap.add_argument("--no-email", action="store_true")
     ap.add_argument("--date")
     ap.add_argument("--from", dest="date_from")
     ap.add_argument("--to", dest="date_to")
     a = ap.parse_args(argv)
     if a.no_upload:
         UPLOAD_TO_DRIVE = False
+    if a.no_email:
+        SEND_EMAIL = False
     if a.date or (a.date_from and a.date_to):
         GENERATE_AUTO = GENERATE_WEEKLY = GENERATE_MONTHLY = False
         GENERATE_DAILY = bool(a.date)

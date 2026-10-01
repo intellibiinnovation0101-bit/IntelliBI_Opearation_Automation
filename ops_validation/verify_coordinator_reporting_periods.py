@@ -342,8 +342,11 @@ print("\n== 5. Performance report delivered next to the Batch Coordinator report
 jobs = [CP.make_job("Daily", D2, D2), CP.make_job("Weekly", date(2026, 9, 21), date(2026, 9, 27))]
 up = lambda folders, name, buf: BC.upload_report(folders, name + ".xlsx", buf, name)
 outdir = tempfile.mkdtemp(prefix="coord_out_")
+_cwd = os.getcwd()
+os.chdir(outdir)                       # any stray relative write would land here
 res = P.run_jobs(jobs, P.discover_report_versions(drive, [(j["start"], j["end"]) for j in jobs]),
-                 loader, now, upload=up, save_dir=outdir)
+                 loader, now, upload=up)
+os.chdir(_cwd)
 check("both jobs delivered", [r.get("failed", False) for r in res], [False, False])
 check("Daily 22-Sep folder: task report + performance report together",
       [p.split("/")[-1].split("_2")[0] for p in drive.files_in("Daily Coordinator Reports", "Daily 22-Sep-2026")],
@@ -354,10 +357,9 @@ check("Weekly folder: Batch Coordinator weekly roll-up + weekly performance repo
               "/".join(_wk) + "/IntelliBI_Coordinator_Task_Performance_Report_Weekly_21_Sep_2026_to_27_Sep_2026"]))
 check("Daily performance counts only 22-Sep tasks", res[0]["summary"]["tasks"], 4)
 check("Weekly performance counts only the week's tasks", res[1]["summary"]["tasks"], 6)
-check("local copy mirrors the Drive folders",
-      os.path.relpath(res[1]["local"], outdir).replace(os.sep, "/"),
-      "Weekly Coordinator Reports/Weekly 21-Sep-2026 to 27-Sep-2026/"
-      "IntelliBI_Coordinator_Task_Performance_Report_Weekly_21_Sep_2026_to_27_Sep_2026.xlsx")
+check("Drive only: no local copy, nothing written to disk",
+      ([r.get("local") for r in res], [f for _d, _s, fs in os.walk(outdir) for f in fs]),
+      ([None, None], []))
 res2 = P.run_jobs(jobs[:1], P.discover_report_versions(drive, [(D2, D2)]), loader, now, upload=up)
 check("re-run -> Version 2, Version 1 kept",
       [p.split("/")[-1] for p in drive.files_in("Daily Coordinator Reports", "Daily 22-Sep-2026")

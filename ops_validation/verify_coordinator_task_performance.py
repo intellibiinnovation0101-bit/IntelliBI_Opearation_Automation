@@ -12,6 +12,9 @@ report versions, and checks the performance ledger against hand-computed answers
   * Done? = Yes in ANY version completes the task; earliest valid stamp is used
   * #REF! stamp -> completed, excluded from timing
   * on time / late / missed / open, Timely %, Days on List, median time
+  * Progress Trend layout (Daily and multi-day): WITHIN-DAY PROGRESS first with the
+    hour-by-hour table + chart under it, the two removed sections gone, charts inside
+    the grid and clear of cells, and period hour figures = the days summed by hour
 No Google access needed.
 """
 import os
@@ -185,9 +188,191 @@ check("coverage day 1: versions / dropped / multi-version / no-time / Yes-No con
 # the workbook builds end-to-end for both a day and a multi-day period
 wb, tasks, summ = P.build_workbook(ledger, D1, D2, "Test", False, now)
 check("workbook tabs", wb.sheetnames,
-      ["Dashboard", "Progress Trend", "Pending & Overdue", "Task Register", "Data Coverage & Rules"])
+      ["Dashboard", "Progress Trend", "Task Register", "Data Coverage & Rules"])
 wb, tasks, summ = P.build_workbook(ledger, D2, D2, "Test", True, now)
 check("daily workbook task count", len(tasks), 4)
+
+# ── Progress Trend tab layout (Daily and multi-day periods) ─────────────────
+def trend_layout(start, end, is_daily):
+    wb_, _t, _s = P.build_workbook(ledger, start, end, "Test", is_daily, now)
+    ws = wb_["Progress Trend"]
+    texts = [str(c.value) for r in ws.iter_rows() for c in r if c.value is not None]
+    names = ("WITHIN-DAY PROGRESS", "DAY-WISE PROGRESS", "COMPLETION % BY TASK GROUP AND DAY",
+             "WHEN ARE TASKS COMPLETED", "HOW QUICKLY ARE TASKS COMPLETED")
+    secs = [(r, str(ws.cell(row=r, column=1).value).strip()) for r in range(1, ws.max_row + 1)
+            if str(ws.cell(row=r, column=1).value or "").strip().startswith(names)]
+    return wb_, ws, texts, secs
+
+
+def anchor_rc(c):
+    """(row, column), 1-based, of a chart's top-left anchor cell."""
+    from openpyxl.utils.cell import coordinate_to_tuple
+    if isinstance(c.anchor, str):
+        return coordinate_to_tuple(c.anchor)
+    return c.anchor._from.row + 1, c.anchor._from.col + 1
+
+
+def chart_checks(ws, label):
+    charts = ws._charts
+    beyond = [c.title.tx.rich.p[0].r[0].t for c in charts if anchor_rc(c)[1] > 10]
+    check(f"{label}: every chart sits inside the 10-column grid (none off to the right)", beyond, [])
+    clash = []
+    for c in charts:
+        r0 = anchor_rc(c)[0]
+        n = int(-(-c.height * 28.35 // P.TREND_ROW_PT))
+        for r in range(r0, r0 + n):
+            if any(ws.cell(row=r, column=k).value not in (None, "") for k in range(1, 11)):
+                clash.append((c.title.tx.rich.p[0].r[0].t, r))
+                break
+    check(f"{label}: no chart covers table / section cells", clash, [])
+    seen, overlap = set(), False
+    for mr in ws.merged_cells.ranges:
+        for rr in range(mr.min_row, mr.max_row + 1):
+            for cc in range(mr.min_col, mr.max_col + 1):
+                overlap = overlap or (rr, cc) in seen
+                seen.add((rr, cc))
+    check(f"{label}: no overlapping merged cells", overlap, False)
+    return charts
+
+
+def title_of(c):
+    return c.title.tx.rich.p[0].r[0].t
+
+
+for start, end, daily, lab in ((D2, D2, True, "Daily"), (D1, D2, False, "Period")):
+    wb_, ws, texts, secs = trend_layout(start, end, daily)
+    when = start.strftime("%d-%b-%Y") if start == end else \
+        f"{start.strftime('%d-%b-%Y')} to {end.strftime('%d-%b-%Y')}"
+    check(f"{lab}: first section is WITHIN-DAY PROGRESS — <period>, right under the title",
+          (secs[0][0], secs[0][1].startswith(f"WITHIN-DAY PROGRESS — {when}")), (4, True))
+    check(f"{lab}: hour-by-hour table directly under it",
+          ws.cell(row=secs[0][0] + 1, column=1).value, "Hour (IST)")
+    check(f"{lab}: 'When are tasks completed' and 'How quickly' sections removed",
+          [t for t in texts if "WHEN ARE TASKS COMPLETED" in t or "HOW QUICKLY" in t], [])
+    check(f"{lab}: section order", [s.split(" — ")[0] for _r, s in secs],
+          ["WITHIN-DAY PROGRESS"] if daily else
+          ["WITHIN-DAY PROGRESS", "DAY-WISE PROGRESS", "COMPLETION % BY TASK GROUP AND DAY"])
+    charts = chart_checks(ws, lab)
+    check(f"{lab}: charts", [title_of(c) for c in charts],
+          ["Generated vs Completed vs Open — hour by hour"] + ([] if daily else
+          ["Each report day's tasks by outcome", "Completion % and Timely % by report day"]))
+    hrow = secs[0][0] + 1
+    last = max(r for r in range(hrow + 1, ws.max_row + 1)
+               if ws.cell(row=r, column=1).value and r < (secs[1][0] if len(secs) > 1 else 10 ** 6))
+    check(f"{lab}: hour chart anchored at column A just under the table (one spacer row)",
+          anchor_rc(charts[0])[::-1], (1, last + 2))
+    blank = run_ = 0
+    for r in range(1, ws.max_row + 1):
+        empty = all(ws.cell(row=r, column=k).value in (None, "") for k in range(1, 11))
+        chart_row = any(anchor_rc(c)[0] <= r <= anchor_rc(c)[0] +
+                        int(-(-c.height * 28.35 // P.TREND_ROW_PT)) for c in charts)
+        run_ = run_ + 1 if empty and not chart_row else 0
+        blank = max(blank, run_)
+    check(f"{lab}: no blank gap longer than one row (outside chart areas)", blank <= 1, True)
+
+# within-day figures: a single day is unchanged; a period = its days combined by hour
+check("single-day hour figures identical whether given a day or [day]",
+      P.hourly_progress(ledger["tasks"], D2, now), P.hourly_progress(ledger["tasks"], [D2], now))
+pooled = P.hourly_progress(ledger["tasks"], [D1, D2], now)
+ts12 = [t for t in ledger["tasks"] if t["day"] in (D1, D2)]
+expect = []
+for r in pooled:
+    h = datetime.strptime(r["label"], "%I %p").hour
+    g = sum(1 for t in ts12 if not t["first_seen"] or t["first_seen"].date() < t["day"]
+            or (t["first_seen"].date() == t["day"] and t["first_seen"].hour <= h))
+    d = sum(1 for t in ts12 if t["completed_at"] and t["completed_at"].date() == t["day"]
+            and t["completed_at"].hour <= h)
+    expect.append((r["label"], g, d, g - d))
+check("period hour figures = every report day's own figures summed by hour (independent recount)",
+      [(r["label"], r["generated"], r["completed"], r["open"]) for r in pooled], expect)
+# ── status-based row colours (presentation only) ──────────────────────────
+def _fill(c):
+    return (c.fill.fgColor.rgb or "")[-6:].upper()
+
+
+def _contrast(a, b):
+    """WCAG contrast ratio of two hex colours."""
+    def lum(h):
+        ch = [int(h[-6:][i:i + 2], 16) / 255 for i in (0, 2, 4)]
+        ch = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in ch]
+        return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2]
+    hi, lo = sorted((lum(a), lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+_wb, _t, _s = P.build_workbook(ledger, D1, D2, "Test", False, now)
+_reg = _wb["Task Register"]
+_h = [c.value for c in _reg[3]]
+_si, _di = _h.index("Status") + 1, _h.index("Days on List") + 1
+# expected colour per task, re-derived from the ledger (register order = day, group, item)
+_order = list(ledger["groups"])
+_exp = []
+for t in sorted(_t, key=lambda t: (t["day"], _order.index(t["group"]), t["label"])):
+    if t["completed"]:
+        _exp.append((t["status"], t.get("days_on_list", 0), "completed"))
+    elif t["status"] == P.ST_MISSED or t.get("days_on_list", 0) >= 2:
+        _exp.append((t["status"], t.get("days_on_list", 0), "urgent"))
+    else:
+        _exp.append((t["status"], t.get("days_on_list", 0), "attention"))
+_name = {v[0]: k for k, v in P.TASK_ROW_COLORS.items()}         # row bg -> category
+_got, _bad, _chip_bad, _accent_bad = [], [], [], []
+for i, r in enumerate(range(4, 4 + len(_exp))):
+    cat = _name.get(_fill(_reg.cell(row=r, column=1)), "?")
+    _got.append((_reg.cell(row=r, column=_si).value, _exp[i][1], cat))
+    row_bg, chip_bg, fg = P.TASK_ROW_COLORS.get(cat, ("", "", ""))
+    for c in range(1, len(_h) + 1):
+        if c != _si and _fill(_reg.cell(row=r, column=c)) != row_bg:
+            _bad.append((r, _h[c - 1]))
+    if (_fill(_reg.cell(row=r, column=_si)), (_reg.cell(row=r, column=_si).font.color.rgb or "")[-6:].upper()) \
+            != (chip_bg, fg):
+        _chip_bad.append(r)
+    if (_reg.cell(row=r, column=1).border.left.color.rgb or "")[-6:].upper() != fg:
+        _accent_bad.append(r)
+check("Task Register: all five task statuses present in the test data",
+      sorted({e[0] for e in _exp}),
+      sorted([P.ST_ON_TIME, P.ST_LATE, P.ST_UNKNOWN, P.ST_OPEN, P.ST_MISSED]))
+check("row colour by severity: completed = green, open = orange, missed or open 2+ days = red",
+      _got, [(e[0], e[1], {"completed": "completed", "attention": "attention", "urgent": "urgent"}[e[2]])
+             for e in _exp])
+check("… covers an OPEN task already pending 2+ consecutive days (red) and a plain open one (orange)",
+      ((P.ST_OPEN, "urgent") in {(g[0], g[2]) for g in _got}, (P.ST_OPEN, "attention") in {(g[0], g[2]) for g in _got}),
+      (True, True))
+check("… the whole row carries the colour (every cell)", _bad, [])
+check("… Status chip: stronger shade of the same colour, dark matching text", _chip_bad, [])
+check("… coloured left edge on the first cell", _accent_bad, [])
+check("palette: green / orange / red hues, light backgrounds, dark text (contrast >= 7:1)",
+      all(_contrast(bg, P.BC.DS_TEXT) >= 7 and _contrast(chip, fg) >= 4.5
+          for bg, chip, fg in P.TASK_ROW_COLORS.values())
+      and [max(range(3), key=lambda i: int(v[0][2 * i:2 * i + 2], 16)) for v in
+           (P.TASK_ROW_COLORS["completed"], P.TASK_ROW_COLORS["attention"], P.TASK_ROW_COLORS["urgent"])]
+      == [1, 0, 0], True)
+check("Task Register guide carries the colour key", "Green = completed" in str(_reg["A2"].value)
+      and "Orange = attention" in str(_reg["A2"].value) and "Red = overdue" in str(_reg["A2"].value), True)
+_dl = [r for r in range(4, _reg.max_row + 1)
+       if isinstance(_reg.cell(row=r, column=_di).value, int) and _reg.cell(row=r, column=_di).value >= 2]
+check("'Days on List' 2+ highlight kept on top of the row colour",
+      [(_reg.cell(row=r, column=_di).font.color.rgb or "")[-6:].upper() for r in _dl],
+      [P.BC.DS_HIGH_FG.upper()[-6:]] * len(_dl))
+check("header row unchanged (navy, white text)",
+      (_fill(_reg.cell(row=3, column=1)), (_reg.cell(row=3, column=1).font.color.rgb or "")[-6:].upper()),
+      (P.BC.DS_NAV2.upper()[-6:], "FFFFFF"))
+_dash = _wb["Dashboard"]
+_rows = {_dash.cell(row=r, column=1).value: r for r in range(1, _dash.max_row + 1)}
+_bad = []
+for gk, meta, gs in P._group_rows(P.scope_ledger(ledger, D1, D2), _t):
+    r = _rows[meta["name"]]
+    lvl = P._status_level(gs["status"]) if gs["tasks"] else "muted"
+    for c in (2, 3, 4, 6):
+        if _fill(_dash.cell(row=r, column=c)) != P.ROW_TINT[lvl]:
+            _bad.append((meta["name"], c))
+    if not gs["tasks"] and _fill(_dash.cell(row=r, column=5)) != P.ROW_TINT["muted"]:
+        _bad.append((meta["name"], 5))
+check("Dashboard scorecard: rows tinted by Status (On track / Watch / Behind / No tasks)", _bad, [])
+check("… total row keeps its own total styling",
+      _fill(_dash.cell(row=_rows["All task groups"], column=1)), P.BC.DS_SUB.upper())
+check("removed display-only helpers are gone (TTC buckets, hour-of-day profile)",
+      [n for n in ("ttc_profile", "completion_hour_profile", "TTC_BUCKETS") if hasattr(P, n)], [])
+check("median time to complete still calculated (Dashboard / e-mail)", s["median_ttc"], 2.0)
 
 # a report version WITHOUT follow-up columns is never scored
 old = report(date(2026, 10, 4), [adm("Old L", "old@x.com")], {})

@@ -47,7 +47,22 @@ Every daily tab ends with four teal input columns the coordinator fills in on th
 
 How the timestamp works: the cell holds `=IF(Done="","",IF(ISERROR(DT),NOW(),IF(OR(DT="",DT=0),NOW(),DT)))` — a self-referencing formula that only evaluates `NOW()` while the cell is still empty. It needs *iterative calculation* to be on, so the script (a) sets it in the workbook (`ds_enable_iterative_calc`, for Excel) and (b) after the upload calls the Sheets API once per file (`_enable_followup_timestamps`) to switch iterative calculation on and pin the sheet's time zone to `Asia/Kolkata` — first with the same impersonated Drive-scope credentials the upload used (the Sheets API accepts the Drive scope, so no extra domain-wide-delegation scope is required), then with the plain service account. If both fail the console shows a loud `FOLLOW-UP DATETIME NOT ENABLED` warning and the fix is manual: File ▸ Settings ▸ Calculation ▸ Iterative calculation = On (Max iterations 1), then clear and re-select Follow-Up Done? on rows already marked. A `#REF!` in the column means exactly that: iterative calculation is off on that sheet. Dropdowns are standard list data validations (they survive the xlsx → Google Sheets conversion). Only flagged rows carry the input cells; banners and empty-state rows do not.
 
+## E-mail
+One e-mail **per generated report** goes from `info@intellibiinnovationstechnologies.in` to `info@intellibiinnovationstechnologies.in` and `intellibihropsb2ch@gmail.com`. The subject is `<Type> Batch Coordinator Report - <period>`.
+- The layout follows the Sales lead-performance e-mail.
+- The Daily e-mail shows the task count per tab (from each tab's own guide count) and asks the Coordinator to record follow-ups in the sheet.
+- Weekly / Monthly / Manual roll-ups send their link.
+- There is no attachment: the Coordinator records follow-ups in the live sheet.
+- `SEND_EMAIL = True` sends it; `False` generates and uploads exactly the same but sends nothing.
+- It uses the Operations Gmail account (`credentials/email_config.py`) through `co-ordinator reports/coordinator_email.py`, with recipient validation and SMTP retry.
+- A failed e-mail is logged and does not fail the run.
+
+## Storage
+Google Drive is the only place this report is stored. Every workbook (Daily, Weekly, Monthly, Manual) is built in an in-memory buffer and uploaded from it (`upload_report()` → `MediaIoBaseUpload`). Nothing is written to `output/reports/` or to any temporary file, and the e-mail carries the Google Sheet link, not an attachment. `ops_validation/verify_coordinator_email_dashboard.py` checks this.
+
 ## Change history
+- 2026-10-01 — Reviewed the storage flow: already Drive-only (in-memory build and upload, no local or temporary file). No code change; documented above and covered by the verify script.
+- 2026-10-02 — E-mail added (`SEND_EMAIL`, `EMAIL_SENDER`, `EMAIL_RECIPIENTS`). Task generation, Drive layout and versioning unchanged.
 - 2026-10-01 — Shared Coordinator Drive layout (Daily / Weekly / Monthly / Manual → reporting-period folder) via `coordinator_periods.py`; `upload_report()` takes nested folder names; `_drive_client()` / `_list_children()` helpers; non-zero exit on a failed report; added to the Morning batch. Task-generation logic unchanged.
 - 2026-09-30 — Freeze panes: Learner Admission Formalities through Phone Number (D4), Wise & Interview Feedback Validation first 4 columns (E3), Instructor Follow-Ups through Phone (E5), Learner Instructor Interview Reminder through Phone (F4). Verified that Google Sheets keeps a frozen column split when full-width banner merges cross it. Wise has no autofilter by design: its four sections have different column headers, and a sheet allows one filter range.
 - 2026-09-30 — Layout: Learner Attendance Follow-Ups drops the per-row Tech Name / Duration columns (they live in the technology banner, which now also states "N learners pending follow-up") and freezes Rank · Student Name · Phone while scrolling sideways; Learner Assignment Follow-Ups' technology banner now reads "Tech Name: … · Duration: … · N pending" (the assignment sub-banner repeats Duration only when a technology has more than one) and freezes # · Student Name · Email · Phone. Data, grouping, ranking, dropdowns and follow-up logic unchanged (`ds_finish(freeze_after_col=…)`).

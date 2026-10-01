@@ -1,6 +1,6 @@
 # pyCoordinatorTaskPerformanceReport.py
 
-Location: `co-ordinator reports/`. Output: `IntelliBI_Coordinator_Task_Performance_Report_<Daily|Weekly|Monthly|Manual>_<period>`. This is a native Google Sheet saved in the **same reporting-period folder** as the Batch Coordinator report of that type and period (layout below), versioned like it (`- Version N`). A local copy goes to `output/reports/coordinator_performance/<type folder>/<period folder>/`.
+Location: `co-ordinator reports/`. Output: `IntelliBI_Coordinator_Task_Performance_Report_<Daily|Weekly|Monthly|Manual>_<period>`. This is a native Google Sheet saved in the **same reporting-period folder** as the Batch Coordinator report of that type and period (layout below), versioned like it (`- Version N`). **Google Drive is the only place the report is stored.** The workbook is built in memory and uploaded from memory, so there is no local copy and no temporary file. Each run also removes report copies that earlier versions left under `output/reports/coordinator_performance/`. It removes only this report's own `.xlsx` files and the folders they leave empty, and never touches other files. A file that can't be removed is logged and doesn't fail the run.
 
 ## Purpose
 Management view of the Batch Coordinator's **task completion and timeliness**:
@@ -94,21 +94,45 @@ A new task tab that carries the follow-up columns is picked up automatically wit
 ## Tabs
 | Tab | Shows |
 |---|---|
-| Dashboard | 8 KPI tiles, a plain-language assessment, a scorecard per task group (tasks, completed, pending, completion %, pending %, timely %, status, on time / late / no time / missed / open, median time to complete, unique items, pending 2+ days), a Needs Management Attention list, and an outcome-by-group chart |
-| Progress Trend | Daily: hour-by-hour tasks generated vs completed vs open. Period: day-wise outcome per report day, completion % / timely % trend, and completion % per group per day. Both: completions by hour of day, and time-to-complete buckets. |
-| Pending & Overdue | Every pending task, Missed first, with days on list, attempted flag and last action / comment |
-| Task Register | The de-duplicated audit trail: one row per task, with the versions it was seen in and recorded in |
+| Dashboard | One 7-column grid. **Overall Coordinator Performance**: 7 KPI tiles — Tasks Generated, Completed, Pending, Completion %, Timely Completion %, Median Time to Complete, and Pending 2+ Days (on a Daily report: Attempted, Not Done). **Task Group Scorecard**: Task Group, Tasks, Completed, Pending, Completion %, Pending %, Status, with a total row. **Completed vs Pending by Task Group** chart, directly under the scorecard (reads the scorecard's Completed and Pending columns). |
+| Progress Trend | **WITHIN-DAY PROGRESS — <report day or period dates>** first, on every report type: the Generated vs Completed vs Open hour-by-hour table (IST) with its chart directly underneath. Daily = that day. Weekly / Monthly / Manual = the period's report days combined by hour of day (each day's own hour-by-hour figures summed). Periods then add DAY-WISE PROGRESS (table, with the outcome chart and the completion % / timely % chart side by side underneath) and COMPLETION % BY TASK GROUP AND DAY. Every chart sits under its table inside the 10-column grid. |
+| Task Register | The de-duplicated audit trail: one row per task, with the versions it was seen in and recorded in. Also the place to review pending / overdue tasks: filter Status = Missed / Open (due today) and sort Days on List. A pending task with "Recorded in" filled was attempted but not done. |
 | Data Coverage & Rules | Per report day: versions, trackable vs not, resolved-before-final-run, recorded in >1 version, Yes without valid time, Yes/No conflicts. Also lists the rules above. |
+
+## E-mail
+One e-mail **per report** goes from `info@intellibiinnovationstechnologies.in` to `info@intellibiinnovationstechnologies.in` and `intellibihropsb2ch@gmail.com`. The subject is `<Type> Coordinator Task Performance Report - <period>`.
+- The layout follows the Sales lead-performance e-mail (`pyConsolidatedLeadPerformanceReport.build_email_body`):
+  - navy header with the reporting period, then "Hello Team";
+  - Task Volume cards, then Completion & Timeliness cards;
+  - **Performance vs Goals**: first **Overall Completion %**, which is the period's own total, the same figure as the Dashboard's "All task groups" row. Then one bar per task group that has tasks in the reported period, in the existing order. Each bar shows
+    `completed / tasks · Completion %` against the `COMPLETION_BENCHMARK` (95% Task Completion) marker.
+    Green when Completion % >= 95%, red below. Groups with no tasks in the period are not shown; a period
+    with no tasks at all shows "No tasks were generated in this period.";
+  - the Task Groups table;
+  - an "Open …" button plus a text link; no attachment, so people work in the live sheet.
+- `SEND_EMAIL = True` sends it. `False` builds and uploads the reports exactly the same, but sends nothing. The `--no-email` command-line option does the same as `False`.
+- Sending goes through the Operations Gmail account in `credentials/email_config.py`, via the shared `co-ordinator reports/coordinator_email.py`:
+  - recipients are validated, so a missing comma never sends to a fused address;
+  - temporary SMTP errors are retried through `common/api_retry.py`;
+  - a sender other than the configured account is refused.
+- A failed e-mail is logged and does not fail the run, because the reports are already in Drive.
+- Performance vs Goals reuses the period's own scorecard figures (`run_jobs` → `groups`, the same
+  `summarise()` rows as the Dashboard), so every percentage reconciles with the Dashboard's Completion %
+  (both shown to 0.1%; the green/red decision uses that shown value). Nothing is recalculated.
+- Group names in that section come from `EMAIL_GROUP_LABELS` (e-mail only). Task-group identity, the
+  Dashboard, the Task Groups table and every other tab keep the registry names. A group not listed in
+  `EMAIL_GROUP_LABELS` is shown under its registry name. When two groups share a display name, the bar's
+  note line shows the registry name so they can be told apart.
 
 ## Run
 ```
 python scripts\run_evening_reports.py                                                 # as scheduled (with summary e-mail)
 python "co-ordinator reports\pyCoordinatorTaskPerformanceReport.py"                 # planned jobs (AUTO)
-python "co-ordinator reports\pyCoordinatorTaskPerformanceReport.py" --no-upload     # local copy only
+python "co-ordinator reports\pyCoordinatorTaskPerformanceReport.py" --no-upload     # dry run: built in memory, nothing saved
 python "co-ordinator reports\pyCoordinatorTaskPerformanceReport.py" --date 2026-09-30
 python "co-ordinator reports\pyCoordinatorTaskPerformanceReport.py" --from 2026-09-01 --to 2026-09-30
 ```
-Settings are at the top of the script: `GENERATE_*` and the period dates, `UPLOAD_TO_DRIVE`, `STATUS_ON_TRACK` / `STATUS_WATCH`, `TTC_BUCKETS`.
+Settings are at the top of the script: `GENERATE_*` and the period dates, `UPLOAD_TO_DRIVE`, `SEND_EMAIL` / `EMAIL_*`, `COMPLETION_BENCHMARK`, `EMAIL_GROUP_LABELS`, `STATUS_ON_TRACK` / `STATUS_WATCH`.
 
 Exit code: 0 when every planned report was delivered. 1 when a report failed (the other reports still run) or the configuration is invalid.
 
@@ -123,8 +147,56 @@ Exit code: 0 when every planned report was delivered. 1 when a report failed (th
   - folder names; both reports landing in the same period folder; re-runs creating versions;
   - no leakage from earlier periods; legacy-folder discovery;
   - Morning-batch membership and the evening scheduler entry, labels and once-per-day gate.
+- `python ops_validation\verify_coordinator_email_dashboard.py` checks both e-mails (SEND_EMAIL on/off,
+  sender, recipients) and the Dashboard layout. For Performance vs Goals it checks the 95% benchmark, the display
+  names, the green/red threshold, that only applicable groups are shown, and that the figures equal the
+  Dashboard scorecard.
+
+## Status row colours
+Rows with a Status column are tinted by that status. The tint is a lighter shade of the colour the Status chip already uses (`ROW_TINT`). Text stays dark, and the chip stays stronger.
+
+| Where | Status → row colour |
+|---|---|
+| Task Register (task-level) | **Green = completed** (on time, late, or time not recorded). **Orange = attention required**: Open (due today), still within its report day. **Red = overdue / urgent**: Missed (report day over, not done), or still open while the same item has been pending `CARRIED_DAYS` (2) or more consecutive report days. That is the existing "Pending 2+ Days" / Days on List rule, not a new threshold. The whole row is coloured; the Status chip is a stronger shade of the same colour, and the first cell has a coloured left edge. The colour key is in the tab's guide line. |
+| Dashboard scorecard | On track → green · Watch → amber · Behind → red · No tasks → grey. The task-group chip, the Completion % band pill, the Status chip and the "All task groups" total row keep their own styling. |
+
+Highlights with their own purpose stay on top: the red bold Days on List (2+), the red bold Pending count, headers and section banners. Values, formats, filters and sorting are unchanged.
 
 ## Change history
+- 2026-10-01 (e-mail): Performance vs Goals now starts with **Overall Completion %**. It uses the period's existing summary (`summarise()` → the Dashboard's "All task groups" Completion %) with the same 95% benchmark and green/red rule. The task-group bars follow unchanged, and a period with no tasks still shows only "No tasks were generated in this period."
+- 2026-10-01 (severity colours): Task Register rows switched to Green / Orange / Red by severity (`TASK_ROW_COLORS`, `_task_severity`). Severity comes from each task's existing status and Days on List. The Dashboard is unchanged. Every value, format, filter and freeze pane was checked unchanged on all four report types.
+- 2026-10-01 (status colours): Task Register and Dashboard scorecard rows are tinted by Status. This is presentation only, and every cell value was checked unchanged on all four report types.
+- 2026-10-01 (simplification):
+  - Dashboard: the Needs Management Attention section is removed and not replaced. The chart now sits directly under the scorecard, at the grid's full width.
+  - **Pending & Overdue tab removed.** Every field it showed is also in the Task Register, which was checked on live data (159 pending tasks, 0 differences):
+    - Status, Task Group, Report Day, Item, Context, What Was Flagged, Generated At and Days on List appear with the same values.
+    - Last Action Taken / Last Comment = Action Taken / Follow-Up Comment.
+    - Attempted? = "Recorded in Versions" is filled, which uses the same rule.
+  - No formula, chart or e-mail figure read from the removed tab. The Task Register guide now explains how to review pending tasks (filter Status, sort Days on List). The e-mail's closing sentence was updated to match.
+  - Calculations, Task Register data, Progress Trend, Drive and scheduling are unchanged.
+- 2026-10-01 (storage):
+  - Drive only: no local report copy. `SAVE_LOCAL_COPY` and `OUTPUT_DIR` were removed, and `run_jobs()` no longer takes `save_dir`.
+  - The workbook goes straight from memory to Drive, so no temporary file is needed and nothing is left behind if the upload or the e-mail fails.
+  - `cleanup_legacy_local_copies()` runs at the start of every run and removes earlier local copies and their empty period folders.
+  - `--no-upload` / `UPLOAD_TO_DRIVE = False` is now a pure dry run.
+  - The parsed-source cache in `cache/coordinator_performance/` (JSON of the task sheets, not reports) is unchanged.
+- 2026-10-01 (Progress Trend):
+  - WITHIN-DAY PROGRESS — <report day / period> is now the first section on every report type, with the Generated vs Completed vs Open hour-by-hour table and its chart directly underneath. For Weekly / Monthly / Manual, the period's report days are combined by hour of day.
+  - Removed the "When are tasks completed?" (completions by hour of day) and "How quickly are tasks completed?" (time-to-complete buckets) sections, their charts, and their display-only code (`completion_hour_profile`, `ttc_profile`, `TTC_BUCKETS`). The median time to complete on the Dashboard and in the e-mail is unchanged.
+  - Layout tidied: every chart sits under its table inside the 10-column grid, with no gaps reserved for side charts. The day-wise charts moved from beside the table (columns L–AE) to underneath it.
+  - Task calculations, the other tabs, the e-mail, Drive and scheduling are unchanged; this was checked cell for cell against the previous build on live data.
+- 2026-10-02:
+  - E-mail added (`SEND_EMAIL`, `EMAIL_SENDER`, `EMAIL_RECIPIENTS`; shared `coordinator_email.py`).
+  - Dashboard simplified:
+    - removed the Missed (Overdue) tile and the ASSESSMENT section;
+    - the scorecard now shows Task Group, Tasks, Completed, Pending, Completion %, Pending % and Status;
+    - the dashboard is a 7-column grid; the chart now shows Completed vs Pending and a print area is set.
+  - Calculations and other tabs are unchanged.
+  - E-mail **Performance vs Goals** reworked: per-task-group Completion % against a 95% Task Completion
+    benchmark (green >= 95%, red below), only for groups with tasks in the period, with short e-mail-only
+    names (`COMPLETION_BENCHMARK`, `EMAIL_GROUP_LABELS`). It replaces the two overall bars that used the 75%
+    band; the overall Completion % and Timely % stay in the cards. The Task Groups table now shows
+    Completion % to 0.1%, like the Dashboard.
 - 2026-10-01:
   - Period scoping by task origin (`scope_ledger`) and the shared `coordinator_periods` planner, with Manual validation.
   - Output moved into the shared Daily / Weekly / Monthly / Manual period folders.

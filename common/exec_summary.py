@@ -150,6 +150,7 @@ _R = {
     "pyBatchCoordinatorDailyAttendanceReport": [
         {"k": "count", "label": "Reports uploaded", "re": r"Uploaded native Google Sheet", "zero": "keep"},
         {"k": "last", "label": "Daily attendance rows", "re": r"Daily rows:\s*(\d+)"},
+        {"k": "flag", "label": "E-mailed", "re": r"\[Email\] ✓ sent", "yes": "Yes", "no": "No"},
     ],
     "pyCoordinatorTaskPerformanceReport": [
         {"k": "count", "label": "Reports uploaded", "re": r"\[Drive\] Uploaded:", "zero": "keep"},
@@ -157,6 +158,7 @@ _R = {
         {"k": "last", "label": "Completed", "re": r"\| Completed:\s*(\d+)", "zero": "keep"},
         {"k": "last", "label": "Pending", "re": r"\| Pending:\s*(\d+)", "zero": "keep"},
         {"k": "last", "label": "Reports failed", "re": r"failed:\s*(\d+)\s*\|"},
+        {"k": "flag", "label": "E-mailed", "re": r"\[Email\] ✓ sent", "yes": "Yes", "no": "No"},
     ],
     # ── Sales ───────────────────────────────────────────────────────────────
     "pyInteraktUsers": [
