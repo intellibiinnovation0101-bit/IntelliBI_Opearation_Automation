@@ -43,6 +43,9 @@ Layer 2  ops_reports_action       reports/actions in PARALLEL where safe;
 | `pyStudentProfileReport.py` | SessionAttendance, AssignmentSubmissions, StudentPayment |
 | `pyAdmissionFormalitiesReport.py` | StudentPayment, ZohoSignatureStatus |
 | `pyStudentAdditionalNote.py` | *(independent)* |
+| `co-ordinator reports/pyBatchCoordinatorDailyAttendanceReport.py` | SessionAttendance, StudentPayment, AssignmentSubmissions, ZohoSignatureStatus |
+
+Evening batch (`scripts/run_evening_reports.py`, 19:00): `co-ordinator reports/pyCoordinatorTaskPerformanceReport.py`.
 
 Per-script docs are in `docs/ops_data_collection/` and `docs/ops_reports_action/`.
 
@@ -55,6 +58,8 @@ IntelliBI_Operations_Automation/
 ├── ops_data_collection/     Layer 1 entry scripts
 ├── ops_reports_action/      Layer 2 entry scripts
 ├── co-ordinator reports/    pyBatchCoordinatorDailyAttendanceReport.py — Batch Coordinator daily / period action lists
+│                            pyCoordinatorTaskPerformanceReport.py — Coordinator completion & timeliness (evening)
+│                            coordinator_periods.py — shared periods + Drive layout (Daily/Weekly/Monthly/Manual)
 ├── ops_validation/          verify_*.py — offline verification (attendance reconcile, instructor-feedback detection)
 ├── common/                  shared code + portability layer
 │   ├── paths.py             PROJECT_ROOT + all folders (pathlib)
@@ -71,7 +76,8 @@ IntelliBI_Operations_Automation/
 ├── cache/  temp/  logs/     working folders (git-ignored, auto-created)
 ├── output/reports/          generated report files
 ├── output/exports/          CSV/XLSX exports (generic)
-├── scripts/                 run_data_collection.py, run_reports_action.py, run_all.py
+├── scripts/                 run_data_collection.py, run_reports_action.py, run_all.py (morning),
+│                            run_evening_reports.py (evening), run_scheduled.py, setup_schedule.ps1, status.ps1
 ├── docs/                    this documentation
 ├── requirements.txt  .gitignore  README.md  run_all.bat
 ```
@@ -104,6 +110,10 @@ The Gmail **sender** identity is centralized in `credentials/email_config.py`
 `_DIGITAL` pair for the secondary account used by the Student Profile report).
 Report recipient/CC/BCC lists stay in each report because they intentionally
 differ per report; the reminder/warning behaviours are preserved as-is.
+
+---
+
+**`network.force_ipv4`** (default `true`, env `INTELLIBI_FORCE_IPV4`): `_bootstrap.py` makes name resolution return IPv4 addresses only. Needed on networks whose IPv6 does not route (phone hotspots, some Wi-Fi): the Google client library's transport (`httplib2`) raises on the first IPv6 connect time-out — `TimeoutError: [WinError 10060]` at `sock.connect` — and never falls back to IPv4, so every Sheets/Drive call fails even though browsers work. Google's APIs are fully reachable over IPv4. Set to `false` to restore dual-stack resolution.
 
 ---
 

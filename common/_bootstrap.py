@@ -66,4 +66,31 @@ try:
 except Exception as _e:  # never let optional config break a run
     sys.stderr.write(f"[bootstrap] config.yaml not applied: {_e}\n")
 
+# ── network: prefer IPv4 for outbound API calls ──────────────────────────────
+# On some networks (phone hotspots, some Wi-Fi) the machine is handed an IPv6
+# address that does not actually route. Browsers fall back to IPv4 silently, but
+# httplib2 — the transport under the Google API client — raises on the first
+# IPv6 connect time-out (WinError 10060) and never tries IPv4, so every Sheets /
+# Drive call fails. network.force_ipv4 in config.yaml (env INTELLIBI_FORCE_IPV4)
+# makes name resolution return IPv4 addresses only. Google's APIs are fully
+# reachable over IPv4, so this is safe on every network; set it to false to
+# restore the default dual-stack behaviour.
+def _force_ipv4() -> None:
+    import socket
+    if getattr(socket, "_intellibi_ipv4_only", False):
+        return
+    _orig_getaddrinfo = socket.getaddrinfo
+
+    def _ipv4_first_only(host, port, family=0, type=0, proto=0, flags=0):
+        res = _orig_getaddrinfo(host, port, family, type, proto, flags)
+        v4 = [r for r in res if r[0] == socket.AF_INET]
+        return v4 or res                       # never break a v6-only host
+
+    socket.getaddrinfo = _ipv4_first_only
+    socket._intellibi_ipv4_only = True
+
+
+if os.environ.get("INTELLIBI_FORCE_IPV4", "").strip().lower() in ("1", "true", "yes", "on"):
+    _force_ipv4()
+
 PROJECT_ROOT = str(_PROJECT_ROOT)

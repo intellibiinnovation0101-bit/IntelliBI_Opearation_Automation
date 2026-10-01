@@ -25,6 +25,7 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
 # ── layer / source folders ───────────────────────────────────────────────────
 LAYER1_DIR = PROJECT_ROOT / "ops_data_collection"    # data collection / refresh
 LAYER2_DIR = PROJECT_ROOT / "ops_reports_action"     # reports & actions
+COORDINATOR_DIR = PROJECT_ROOT / "co-ordinator reports"  # Batch Coordinator reports
 COMMON_DIR = PROJECT_ROOT / "common"
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 

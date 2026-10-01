@@ -14,6 +14,12 @@ Layer 1  ops_data_collection    4 refresh jobs (parallel)
    |
 Layer 2  ops_reports_action     reports / reminders / actions (parallel where safe;
                                  a report whose Layer-1 dependency failed is skipped)
+         + co-ordinator reports/pyBatchCoordinatorDailyAttendanceReport.py
+                                 (the Coordinator's daily task list)
+   ...
+Evening  scripts/run_evening_reports.py
+                                 co-ordinator reports/pyCoordinatorTaskPerformanceReport.py
+                                 (Coordinator completion + timeliness, after the working day)
 ```
 
 Full details: `docs/PROJECT_DOCUMENTATION.md` and the per-script docs under `docs/`.
@@ -64,14 +70,25 @@ scratch to `temp/`, outputs to `output/`. No machine-specific locations. Log
 level: `SALES_LOG_LEVEL` env or `config/logging_config.yaml`.
 
 ## 6. Schedule (Windows Task Scheduler)
-Create a task → Action **Start a program** → `run_all.bat`, with **Start in** set
-to the project folder (no absolute paths). "Run whether user is logged on or not."
-The same task works verbatim after copying the folder to another machine.
+From an **elevated PowerShell** in the project folder, once per machine:
+```
+powershell -ExecutionPolicy Bypass -File scripts\setup_schedule.ps1
+```
+It registers two tasks, both through `scripts\run_scheduled.py` (overlap lock +
+once-per-day success gate; the later time of each pair is a retry-only window):
+
+| Task | Times | Runs |
+|---|---|---|
+| IntelliBI Operations Automation (Morning batch) | 10:30, retry 11:30 | `scripts\run_all.py` — Layer 1 + Layer 2, incl. the Batch Coordinator daily task report |
+| IntelliBI Operations Automation - Evening | 19:00, retry 20:00 | `scripts\run_evening_reports.py` — Coordinator Task Performance report |
+
+`powershell -ExecutionPolicy Bypass -File scripts\status.ps1` shows both tasks.
+The same setup works verbatim after copying the folder to another machine.
 
 ## 7. Deploy to a new machine
 1. Copy the whole folder. 2. venv + `pip install -r requirements.txt`.
 3. Put secrets in `credentials/` and workbooks in `data_inputs/`.
-4. Review `config/config.yaml`. 5. `python scripts\run_all.py` — or schedule `run_all.bat`.
+4. Review `config/config.yaml`. 5. `python scripts\run_all.py`, then run `scripts\setup_schedule.ps1` (section 6).
 
 No source-code path edits are ever required.
 

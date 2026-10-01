@@ -13,7 +13,6 @@ $ErrorActionPreference = "SilentlyContinue"
 $proj     = Split-Path -Parent $PSScriptRoot
 $taskName = "IntelliBI Operations Automation"
 $logDir   = Join-Path $proj "logs"
-$marker   = Join-Path $proj "cache\scheduler\ops_last_success.txt"
 
 function Decode-Result($code) {
   switch ($code) {
@@ -34,30 +33,37 @@ Write-Host "==================================================================="
 Write-Host " IntelliBI Operations Automation - schedule status" -ForegroundColor Cyan
 Write-Host "==================================================================="
 
-$task = Get-ScheduledTask -TaskName $taskName
-if (-not $task) {
-  Write-Host "Task '$taskName' is NOT registered. Run scripts\setup_schedule.ps1." -ForegroundColor Yellow
-} else {
-  $i = $task | Get-ScheduledTaskInfo
-  Write-Host ("State        : {0}" -f $task.State)
-  Write-Host ("Last run     : {0}" -f $i.LastRunTime)
-  Write-Host ("Last result  : {0}" -f (Decode-Result $i.LastTaskResult))
-  Write-Host ("Next run     : {0}" -f $i.NextRunTime)
-  Write-Host ("Missed runs  : {0}" -f $i.NumberOfMissedRuns)
-  Write-Host  "Trigger times: 10:00 normal, 11:00 & 12:00 retry-only (daily)"
-}
-
-Write-Host ""
+$tasks = @(
+  @{ Name = $taskName;                       Marker = (Join-Path $proj "cache\scheduler\ops_last_success.txt") },
+  @{ Name = "IntelliBI Operations Automation - Evening"; Marker = (Join-Path $proj "cache\scheduler\ops_evening_last_success.txt") }
+)
 $today = (Get-Date).ToString("yyyy-MM-dd")
-if (Test-Path $marker) {
-  $succDate = (Get-Content $marker -Raw).Trim()
-  if ($succDate -eq $today) {
-    Write-Host ("Today ({0}) : ALREADY SUCCEEDED - 11:00/12:00 will skip." -f $today) -ForegroundColor Green
-  } else {
-    Write-Host ("Today ({0}) : not yet succeeded (last success {1}) - next window will run/retry." -f $today,$succDate) -ForegroundColor Yellow
+foreach ($t in $tasks) {
+  Write-Host ""
+  Write-Host ("[{0}]" -f $t.Name) -ForegroundColor Cyan
+  $task = Get-ScheduledTask -TaskName $t.Name
+  if (-not $task) {
+    Write-Host "  NOT registered. Run scripts\setup_schedule.ps1." -ForegroundColor Yellow
+    continue
   }
-} else {
-  Write-Host ("Today ({0}) : no success recorded yet - next window will run." -f $today) -ForegroundColor Yellow
+  $i = $task | Get-ScheduledTaskInfo
+  $times = ($task.Triggers | ForEach-Object { ([datetime]$_.StartBoundary).ToString("HH:mm") }) -join ", "
+  Write-Host ("  State        : {0}" -f $task.State)
+  Write-Host ("  Last run     : {0}" -f $i.LastRunTime)
+  Write-Host ("  Last result  : {0}" -f (Decode-Result $i.LastTaskResult))
+  Write-Host ("  Next run     : {0}" -f $i.NextRunTime)
+  Write-Host ("  Missed runs  : {0}" -f $i.NumberOfMissedRuns)
+  Write-Host ("  Trigger times: {0}  (first = normal run, later = retry-only)" -f $times)
+  if (Test-Path $t.Marker) {
+    $succDate = (Get-Content $t.Marker -Raw).Trim()
+    if ($succDate -eq $today) {
+      Write-Host ("  Today ({0}) : ALREADY SUCCEEDED - retry windows will skip." -f $today) -ForegroundColor Green
+    } else {
+      Write-Host ("  Today ({0}) : not yet succeeded (last success {1})." -f $today,$succDate) -ForegroundColor Yellow
+    }
+  } else {
+    Write-Host ("  Today ({0}) : no success recorded yet." -f $today) -ForegroundColor Yellow
+  }
 }
 
 Write-Host ""

@@ -24,6 +24,12 @@
   Usage:
       python scripts/run_scheduled.py --label sales
       python scripts/run_scheduled.py --label ops --once-per-day
+      python scripts/run_scheduled.py --label ops_evening --once-per-day \
+                                      --entry run_evening_reports.py
+
+  --entry picks the batch runner in scripts/ (default run_all.py = the Morning
+  pipeline). Each label has its own lock and success marker, so the Morning and
+  Evening batches never block or skip each other.
 
   Exit code mirrors run_all (0 = success). A skipped trigger exits 0.
 ================================================================================
@@ -121,7 +127,13 @@ def main() -> int:
     ap.add_argument("--label", required=True, help="short id for the lock/marker (e.g. sales, ops)")
     ap.add_argument("--once-per-day", action="store_true",
                     help="skip if the pipeline already succeeded today (retry-window mode)")
+    ap.add_argument("--entry", default="run_all.py",
+                    help="batch runner in scripts/ to launch (default run_all.py)")
     args = ap.parse_args()
+    entry = paths.SCRIPTS_DIR / os.path.basename(args.entry)
+    if not entry.exists():
+        print(f"run_scheduled: entry script not found: {entry}", file=sys.stderr)
+        return 2
 
     log = logging_utils.get_logger("run_scheduled")
     today = datetime.now().strftime("%Y-%m-%d")
@@ -142,9 +154,8 @@ def main() -> int:
         return 0
 
     try:
-        run_all = paths.SCRIPTS_DIR / "run_all.py"
-        log.info("[%s] launching %s", args.label, run_all)
-        rc = subprocess.call([sys.executable, str(run_all)], cwd=str(paths.PROJECT_ROOT))
+        log.info("[%s] launching %s", args.label, entry)
+        rc = subprocess.call([sys.executable, str(entry)], cwd=str(paths.PROJECT_ROOT))
         if rc == 0:
             log.info("[%s] pipeline SUCCEEDED.", args.label)
             if args.once_per_day:

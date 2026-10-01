@@ -47,6 +47,9 @@ TITLES = {
     "pyAdmissionFormalitiesReport": "Admission Formalities Report",
     "pyStudentAdditionalNote": "Student Additional Note",
     "pyWiseDataValidationReport": "Wise Data Validation Report",
+    "pyBatchCoordinatorDailyAttendanceReport": "Batch Coordinator Report",
+    # ── Operations — Evening batch ──────────────────────────────────────────
+    "pyCoordinatorTaskPerformanceReport": "Coordinator Task Performance",
     # ── Sales ───────────────────────────────────────────────────────────────
     "pyInteraktUsers": "Interakt WhatsApp Users",
     "pyExotelInboxScrape": "Exotel Inbox Scrape",
@@ -143,6 +146,17 @@ _R = {
          "re": r"\[Validate\]\s*Courses\s*->[^\n]*invalid=(\d+)", "zero": "keep"},
         {"k": "last", "label": "Instructor records flagged",
          "re": r"\[Validate\]\s*Instructors\s*->[^\n]*invalid=(\d+)", "zero": "keep"},
+    ],
+    "pyBatchCoordinatorDailyAttendanceReport": [
+        {"k": "count", "label": "Reports uploaded", "re": r"Uploaded native Google Sheet", "zero": "keep"},
+        {"k": "last", "label": "Daily attendance rows", "re": r"Daily rows:\s*(\d+)"},
+    ],
+    "pyCoordinatorTaskPerformanceReport": [
+        {"k": "count", "label": "Reports uploaded", "re": r"\[Drive\] Uploaded:", "zero": "keep"},
+        {"k": "last", "label": "Tasks in period", "re": r"Period tasks:\s*(\d+)", "zero": "keep"},
+        {"k": "last", "label": "Completed", "re": r"\| Completed:\s*(\d+)", "zero": "keep"},
+        {"k": "last", "label": "Pending", "re": r"\| Pending:\s*(\d+)", "zero": "keep"},
+        {"k": "last", "label": "Reports failed", "re": r"failed:\s*(\d+)\s*\|"},
     ],
     # ── Sales ───────────────────────────────────────────────────────────────
     "pyInteraktUsers": [

@@ -15,6 +15,12 @@ scripts still run.
     pyStudentProfileReport           <- SessionAttendance, AssignmentSubmissions, StudentPayment
     pyAdmissionFormalitiesReport     <- StudentPayment, ZohoSignatureStatus
     pyStudentAdditionalNote          <- (independent)
+    pyWiseDataValidationReport       <- StudentPayment
+    pyBatchCoordinatorDailyAttendanceReport   (co-ordinator reports/)
+                                     <- SessionAttendance, StudentPayment,
+                                        AssignmentSubmissions, ZohoSignatureStatus
+       The Coordinator's daily task list (Morning batch). Its evening companion,
+       pyCoordinatorTaskPerformanceReport, runs from scripts/run_evening_reports.py.
 
 Run standalone:   python scripts/run_reports_action.py   (no gating — assumes L1 already ran)
 """
@@ -48,7 +54,22 @@ JOBS = [
     ("pyStudentAdditionalNote", "Student Additional Note", []),
     ("pyWiseDataValidationReport", "Wise Data Validation Report",
         ["pyStudentPaymentClassesStudentEnrolled"]),
+    # Batch Coordinator daily task list — reads attendance/feedback, students,
+    # assignment submissions and admission (Zoho) data, so it waits for all four
+    # Layer-1 refreshes and is skipped (never built on stale data) if one failed.
+    ("pyBatchCoordinatorDailyAttendanceReport", "Batch Coordinator Daily Report",
+        ["pySessionAttendanceStudentTeacherFeedbacks", "pyStudentPaymentClassesStudentEnrolled",
+         "pyAssignmentSubmissions", "pyZohoSignatureStatusRefresh"]),
 ]
+
+
+def script_path(stem):
+    """Layer-2 scripts live in ops_reports_action/; the Coordinator reports live
+    in 'co-ordinator reports/'."""
+    p = paths.LAYER2_DIR / f"{stem}.py"
+    if p.exists():
+        return p
+    return paths.COORDINATOR_DIR / f"{stem}.py"
 
 
 def _timeout():
@@ -96,8 +117,7 @@ def run(logger=None, l1_status=None) -> dict:
     log.info("%s: running %d, skipping %d", LAYER, len(runnable), len(skipped))
 
     def one(stem, label):
-        return common_utils.run_script(paths.LAYER2_DIR / f"{stem}.py",
-                                       label=label, timeout=timeout)
+        return common_utils.run_script(script_path(stem), label=label, timeout=timeout)
 
     scripts = []
     if runnable:

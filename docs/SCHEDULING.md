@@ -14,7 +14,24 @@ The times are staggered off the Sales schedule (11:00 / 14:00 / 17:00 / 18:45 /
 
 Each real run executes the full `scripts/run_all.py` (Layer 1 in parallel →
 Layer 2 with dependency gating) and e-mails the detailed summary log to
-`info@intellibiinnovationstechnologies.in`.
+`info@intellibiinnovationstechnologies.in`. Layer 2 includes the **Batch
+Coordinator daily task report** (`co-ordinator reports/`), so the Coordinator's
+list is ready each morning.
+
+## Evening batch — Coordinator Task Performance
+
+A second task, **"IntelliBI Operations Automation - Evening"**, runs
+`scripts/run_evening_reports.py` (the Coordinator Task Performance report) after
+the working day, using the same once-per-day mechanism with its own label:
+
+| 19:00 | 20:00 |
+|-------|-------|
+| normal evening run | retry **only if** 19:00 did not succeed |
+
+`scripts/run_scheduled.py --label ops_evening --once-per-day --entry run_evening_reports.py`.
+The marker is `cache/scheduler/ops_evening_last_success.txt` and the lock is
+`ops_evening.lock`, so the morning and evening batches never block or skip each
+other. It e-mails its own summary, like the morning batch.
 
 ## One-time setup (on the target machine, after deployment)
 
@@ -24,8 +41,9 @@ Open **PowerShell as Administrator**, `cd` into the project folder, and run:
 powershell -ExecutionPolicy Bypass -File scripts\setup_schedule.ps1
 ```
 
-That registers a single Task Scheduler task named **"IntelliBI Operations
-Automation"** with the two daily triggers. Paths are derived automatically.
+That registers **two** tasks: **"IntelliBI Operations Automation"** (10:30 / 11:30)
+and **"IntelliBI Operations Automation - Evening"** (19:00 / 20:00). Paths are
+derived automatically. `scripts\status.ps1` shows both.
 
 ## The once-per-day success mechanism
 
@@ -66,8 +84,10 @@ del cache\scheduler\ops_last_success.txt
 Manual test without the scheduler:
 ```bat
 .venv\Scripts\python.exe scripts\run_scheduled.py --label ops --once-per-day
+.venv\Scripts\python.exe scripts\run_scheduled.py --label ops_evening --once-per-day --entry run_evening_reports.py
 ```
 
 ## Change history
 - 2026-08-24 — Added scheduling (10:00 normal + 11:00/12:00 retry-until-success, once per day, overlap-protected) via `run_scheduled.py` + `setup_schedule.ps1`.
+- 2026-10-01 — Added the Batch Coordinator report to the morning batch (Layer 2) and the evening batch (19:00 + 20:00 retry, `run_evening_reports.py`, Coordinator Task Performance report); `run_scheduled.py` gained `--entry`. Re-run `setup_schedule.ps1` as Administrator to apply.
 - 2026-09-11 — Changed schedule to 10:30 normal + 11:30 retry (removed 12:00), staggered off the Sales schedule so the two projects never run at the same time. Re-run `setup_schedule.ps1` as Administrator to apply.

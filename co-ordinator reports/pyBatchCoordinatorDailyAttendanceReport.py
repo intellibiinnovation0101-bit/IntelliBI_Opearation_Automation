@@ -21,12 +21,17 @@
       Last Present / Absent Streak / Feedbacks / Feedback Part. % / Avg Rating.
 
   OUTPUT
-    One native Google Sheet per report date, written into a DATE-WISE sub-folder
-    under the coordinator Drive folder, so history is never overwritten. The file
-    name carries the report period ("duration"), like the daily report, e.g.:
-        <parent>/YYYY-MM-DD/IntelliBI_Batch_Coordinator_Daily_Attendance_Report_
-                            12-Sep-2026_10.00_AM_-_12-Sep-2026_03.00_PM
-    Re-running the same day replaces that day's sheet only (matched by base name).
+    One native Google Sheet per report, written into the shared Coordinator
+    layout (coordinator_periods.py) so history is never overwritten and the
+    Task Performance report for the same period sits in the same folder:
+        <parent>/Daily Coordinator Reports/Daily 12-Sep-2026/
+            IntelliBI_Batch_Coordinator_Daily_Attendance_Report_
+            12-Sep-2026_10.00_AM_-_12-Sep-2026_03.00_PM
+        <parent>/Weekly Coordinator Reports/Weekly 07-Sep-2026 to 13-Sep-2026/ …
+        <parent>/Monthly Coordinator Reports/Monthly Sep-2026/ …
+        <parent>/Manual Coordinator Reports/Manual 01-Sep-2026 to 15-Sep-2026/ …
+    Re-running the same report saves the next "- Version N"; earlier versions
+    are never modified.
     The workbook carries ALL the daily-report tabs, in the same order:
         Session Summary | Student Detail | Feedback Rating | Teacher_No_Feedback
     Session Summary, Feedback Rating and Teacher_No_Feedback are produced
@@ -81,13 +86,20 @@ except Exception:
 import io
 import logging
 import calendar
-from datetime import datetime, date, timedelta, time
+from datetime import datetime, date, timedelta, time, timezone
 
 import pandas as pd
 import openpyxl
 
 # Reuse the existing daily report wholesale (helpers, styling, colours, loader).
 import pyAttendaceFeedbackReport as AR
+
+# Shared Coordinator reporting periods + Drive layout (Daily / Weekly / Monthly /
+# Manual → reporting-period folder) — the SAME module the Task Performance report
+# uses, so both reports for one period always land in one folder.
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+import coordinator_periods as CP
 
 # Reuse the coordinator flagging logic for "Why Flagged" (best-effort).
 try:
@@ -156,7 +168,8 @@ FOLLOWUP_DONE_OPTIONS = ["Yes", "No"]
 FOLLOWUP_ACTIONS = {
     "attendance": ["Call", "WhatsApp", "Call & WhatsApp", "Email", "No response", "Other"],
     "assignment": ["Call", "WhatsApp", "WhatsApp Group", "Call & WhatsApp", "Email", "No response", "Other"],
-    "admission":  ["Form Send", "Form Signed", "Call", "WhatsApp", "Call & WhatsApp", "Email", "Other"],
+    "admission":  ["Form Send", "Form Signed", "Call", "WhatsApp", "Call & WhatsApp", "Email", "Other",
+                   "Not Applicable"],
     "wise":       ["Corrected", "Invalid", "Call", "WhatsApp", "Call & WhatsApp", "Email", "Other"],
     "instructor": ["Call", "WhatsApp", "Call & WhatsApp", "Email", "Other"],
     "interview":  ["Call", "WhatsApp", "Call & WhatsApp", "Email", "Other"],
@@ -167,7 +180,9 @@ FOLLOWUP_TIMEZONE  = "Asia/Kolkata"              # NOW() on the uploaded sheet =
 # =============================================================================
 #  COLUMN LAYOUT
 # =============================================================================
-STUDENT_COLS = ["Rank", "Tech Name", "Duration", "Student Name", "Phone"]
+# Tech Name / Duration are NOT detail columns: they are the technology banner
+# that groups the rows (shown once per group, with the pending-learner count).
+STUDENT_COLS = ["Rank", "Student Name", "Phone"]
 DAILY_COLS   = ["Status", "Attendance %", "Duration (min)", "Joined At",
                 "Left At", "Remarks", "Feedback Given?", "Feedback Rating (/10)"]
 AGG_COLS     = ["Sessions (P/T)", "Agg Attendance %", "Agg Duration Att %",
@@ -636,14 +651,17 @@ def ds_followup_cells(ws, row, first_col):
     freezes NOW() the first time Follow-Up Done? is set (and clears again when
     it is cleared); iterative calculation makes it stable. The `=0` guard covers
     engines whose first pass of a self-reference starts at 0 (Excel / LibreOffice)
-    as well as Google Sheets' empty start — verified: stamps once, then holds."""
+    as well as Google Sheets' empty start, and the ISERROR guard recovers a cell
+    that showed #REF! (circular dependency) before iterative calculation was
+    switched on — verified: stamps once, then holds."""
     done = _gcl(first_col + 2)
     dt = _gcl(first_col + 3)
     ds_cell(ws, row, first_col, None, bg=DS_INPUT_BG, h_align="center")
     ds_cell(ws, row, first_col + 1, None, bg=DS_INPUT_BG, h_align="left", wrap=True)
     ds_cell(ws, row, first_col + 2, None, bg=DS_INPUT_BG, h_align="center", bold=True)
     c = ds_cell(ws, row, first_col + 3,
-                f'=IF({done}{row}="","",IF(OR({dt}{row}="",{dt}{row}=0),NOW(),{dt}{row}))',
+                f'=IF({done}{row}="","",IF(ISERROR({dt}{row}),NOW(),'
+                f'IF(OR({dt}{row}="",{dt}{row}=0),NOW(),{dt}{row})))',
                 bg=DS_INPUT_BG, h_align="center", number_fmt=FOLLOWUP_DT_FORMAT)
     _DS_FU_ROWS.setdefault(id(ws), []).append(row)
     return c
@@ -699,7 +717,8 @@ def ds_enable_iterative_calc(wb):
 
 
 def ds_finish(ws, header_row, ncols, widths=None, why_col=None, why_width=70,
-              default_width=14, filter_from=None, tab_color=None, followup=None):
+              default_width=14, filter_from=None, tab_color=None, followup=None,
+              freeze_after_col=None):
     """Freeze below the headers, autofilter, column widths, print setup, no
     gridlines. `widths` maps header text → width; unspecified columns get
     `default_width`. The Why-Flagged column gets `why_width`."""
@@ -717,7 +736,9 @@ def ds_finish(ws, header_row, ncols, widths=None, why_col=None, why_width=70,
     ds_fit_guide(ws, ncols)
     last = max(ws.max_row, header_row)
     ws.auto_filter.ref = f"A{filter_from or header_row}:{_gcl(ncols)}{last}"
-    ws.freeze_panes = f"A{header_row + 1}"
+    # rows above the body always stay; freeze_after_col (1-based) additionally keeps
+    # the identity columns up to that column visible while scrolling sideways
+    ws.freeze_panes = f"{_gcl(freeze_after_col + 1) if freeze_after_col else 'A'}{header_row + 1}"
     ws.sheet_view.showGridLines = False
     ws.sheet_view.zoomScale = 90
     try:
@@ -1160,7 +1181,8 @@ def _finish_instr(ws, row_num):
         "No. of Feedbacks": 10, "Feedback Rate %": 10, "⭐ Avg Rating(/10)": 10,
         "Min Rating": 8, "Max Rating": 8, "Feedback Given": 10,
     }, why_col=_IC["Why Flagged"], why_width=70, default_width=10, tab_color=DS_SECTION,
-       followup=(_IC["Action Taken"], FOLLOWUP_ACTIONS["instructor"]))
+       followup=(_IC["Action Taken"], FOLLOWUP_ACTIONS["instructor"]),
+       freeze_after_col=_IC["Phone"])
 
 
 def _fmt_clock(dt):
@@ -1493,7 +1515,8 @@ def build_assignment_followups(ws, by_tech, report_date, period_label=None):
     1st = Info), Reminder stage as a chip, neutral zebra rows."""
     period = period_label or report_date.strftime('%d-%b-%Y')
     ds_title(ws, AFN, "Learner Assignment Follow-Ups", period,
-             "Learners with a pending assignment submission, grouped by technology and assignment. "
+             "Learners with a pending assignment submission, grouped by technology (blue banner: "
+             "Tech Name · Duration · pending count) and assignment (pale banner). "
              "Priority chip on '#': High = deadline missed / final day, Medium = 2nd reminder, "
              "Info = 1st reminder.   Colour key: ■ High = red  ■ Medium = amber  ■ Info = blue."
              + DS_GUIDE_FOLLOWUP)
@@ -1512,8 +1535,19 @@ def build_assignment_followups(ws, by_tech, report_date, period_label=None):
     for cn in sorted((by_tech or {}).keys(), key=lambda x: str(x).lower()):
         assignments = by_tech[cn]
         n_tech = sum(len(rows) for _t, _a, rows in assignments if rows)
-        row_num = ds_section(ws, row_num, AFN,
-                             f"{cn or '(Unknown Technology)'}   ·   {n_tech} pending", level=1)
+        # Duration(s) of this technology's pending assignments (normally one batch)
+        durations = []
+        for _t, _a, rows in assignments:
+            if rows:
+                d = str(rows[0].get("class_subject", "") or "").strip()
+                if d and d not in durations:
+                    durations.append(d)
+        one_duration = (len(durations) == 1)
+        head = f"Tech Name: {cn or '(Unknown Technology)'}"
+        if durations:
+            head += f"   ·   Duration: {' / '.join(durations)}"
+        head += f"   ·   {n_tech} pending"
+        row_num = ds_section(ws, row_num, AFN, head, level=1)
 
         for title_txt, aid, rows in sorted(assignments, key=lambda t: str(t[0]).lower()):
             if not rows:
@@ -1522,8 +1556,9 @@ def build_assignment_followups(ws, by_tech, report_date, period_label=None):
             # Assignment Details header (reuses the same meta shown in the PDF)
             _assigned = r0.get("assigned_date_str", "") or "—"
             details = (f"📝  {title_txt or '(Untitled Assignment)'}"
-                       f"      •  Duration: {r0.get('class_subject','') or '—'}"
-                       f"      •  Max Marks: {r0.get('maximum_marks','') or '—'}"
+                       + ("" if one_duration else
+                          f"      •  Duration: {r0.get('class_subject','') or '—'}")
+                       + f"      •  Max Marks: {r0.get('maximum_marks','') or '—'}"
                        f"      •  Assigned: {_assigned}"
                        f"      •  Deadline: {r0.get('deadline_str','') or '—'}"
                        f"      •  Pending: {len(rows)}")
@@ -1561,7 +1596,8 @@ def build_assignment_followups(ws, by_tech, report_date, period_label=None):
     ds_finish(ws, HDR_ROW, AFN, widths={
         "#": 6, "Student Name": 24, "Email": 32, "Phone": 16, "Deadline": 13, "Reminder": 16,
     }, why_col=_AF["Why Flagged"], why_width=64, default_width=14, tab_color=DS_SECTION,
-       followup=(_AF["Action Taken"], FOLLOWUP_ACTIONS["assignment"]))
+       followup=(_AF["Action Taken"], FOLLOWUP_ACTIONS["assignment"]),
+       freeze_after_col=_AF["Phone"])
     return ws
 
 
@@ -1743,7 +1779,8 @@ def build_admission_formalities(ws, rows, report_date, period_label=None):
         "Joined On": 12, "Request Form Name": 30, "Recipient Status": 20,
         "Request Status": 30, "Sent Date": 20, "Signed Date": 20, "Expiry Date": 20,
     }, why_col=_ADMC["Why Flagged"], why_width=66, default_width=14, tab_color=DS_SECTION,
-       followup=(_ADMC["Action Taken"], FOLLOWUP_ACTIONS["admission"]))
+       followup=(_ADMC["Action Taken"], FOLLOWUP_ACTIONS["admission"]),
+       freeze_after_col=_ADMC["Phone Number"])
     return ws
 
 
@@ -1866,6 +1903,29 @@ def _wise_instr_reason(vtype, msg):
     return [r for r in runs if r[0]]
 
 
+def _wise_joined_on_ist(value):
+    """Display-only: render a Wise 'Joined On' timestamp in IST.
+    Wise returns it as UTC ISO-8601 (e.g. '2026-09-29T11:04:12.729Z'); the same
+    instant is shown as '2026-09-29 16:34:12 IST' — the format the Course
+    section's 'Created On' already uses. A value that is not a parseable
+    timestamp is shown exactly as received; the record itself is never changed."""
+    raw = str(value or "").strip()
+    if not raw:
+        return raw
+    txt = raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw
+    try:
+        dt = datetime.fromisoformat(txt)
+    except ValueError:
+        try:                                           # e.g. '2026-09-29 11:04:12'
+            dt = datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return raw
+    if dt.tzinfo is None:                              # naive → treat as UTC (Wise export)
+        dt = dt.replace(tzinfo=timezone.utc)
+    ist = dt.astimezone(timezone(timedelta(hours=5, minutes=30)))
+    return ist.strftime("%Y-%m-%d %H:%M:%S IST")
+
+
 def _wise_student_display(records):
     disp = []
     for i, rec in enumerate(records or [], 1):
@@ -1878,7 +1938,7 @@ def _wise_student_display(records):
                 reasons.append(_wise_field_reason(label, st, rec.get(dkey, "") if dkey else syn))
                 sev = max(sev, rank)
         cells = [i, rec.get("Student Name", "") or "—", rec.get("Batch Name", "") or "—",
-                 "", "", "", "", "", "", rec.get("Joined On", "") or "—"]
+                 "", "", "", "", "", "", _wise_joined_on_ist(rec.get("Joined On", "")) or "—"]
         disp.append({"cells": cells, "status_cells": statuses,
                      "severity": sev, "why_reasons": reasons})
     return disp
@@ -2033,7 +2093,7 @@ def build_wise_validation(ws, data, report_date, period_label=None, interview_ro
         # Still show the Interview Feedback validation section (independent of Wise data).
         _wise_render_section(ws, row + 1, NMAX, IFV_BANNER, IFV_DATA, ifv_rows, {2, 3, 4, 5})
         ds_followup_apply(ws, NMAX + 1, FOLLOWUP_ACTIONS["wise"])
-        ws.freeze_panes = "A3"
+        ws.freeze_panes = "E3"          # title + guide rows, and the first 4 columns
         ws.sheet_view.showGridLines = False
         ws.sheet_properties.tabColor = DS_SECTION
         return ws
@@ -2062,7 +2122,7 @@ def build_wise_validation(ws, data, report_date, period_label=None, interview_ro
     ds_followup_apply(ws, NMAX + 1, FOLLOWUP_ACTIONS["wise"])
 
     ds_fit_guide(ws, NTOT)
-    ws.freeze_panes = "A3"
+    ws.freeze_panes = "E3"              # title + guide rows, and the first 4 columns
     ws.sheet_view.showGridLines = False
     ws.sheet_view.zoomScale = 90
     ws.sheet_properties.tabColor = DS_SECTION
@@ -2088,7 +2148,8 @@ def build_student_detail_ext(ws, att_daily: pd.DataFrame, susp_daily: pd.DataFra
     action on its own line."""
     period = period_label or report_date.strftime('%d-%b-%Y')
     ds_title(ws, N, "Learner Attendance Follow-Ups", period,
-             "One row per learner who needs a follow-up today, grouped by technology; Rank 1 = "
+             "One row per learner who needs a follow-up today, grouped by technology (the blue "
+             "banner names the Tech / Duration and how many learners are pending); Rank 1 = "
              "most urgent within the technology (chip: High = rank 1–3, Medium = 4–6, Info = others). "
              "Peach rows = yesterday's session.   Colour key: ■ High = red  ■ Medium = amber  "
              "■ Info = blue  ■ OK = green." + DS_GUIDE_FOLLOWUP)
@@ -2182,27 +2243,37 @@ def build_student_detail_ext(ws, att_daily: pd.DataFrame, susp_daily: pd.DataFra
         sorted_att = _tmp.sort_values(
             ["course_name", "course_title", "_rank_sort"], na_position="last")
 
-        banner_group = None
-        alt_i = 0
+        # Pass 1 — the follow-up rows, in their final order (same qualification
+        # rule as before: applicable AND at least one reason). Collected first so
+        # every technology banner can show how many learners it holds.
+        flagged = []
         for _, r in sorted_att.iterrows():
             # not-applicable students can't be follow-ups here
             if "_attn_applicable" in r.index and not bool(r.get("_attn_applicable", True)):
                 continue
-
             cn = r.get("course_name", "")
             ct = r.get("course_title", "")
             sid = str(r.get("student_id", ""))
             agg_key = (sid, str(cn), str(ct))
             agg = agg_map.get(agg_key)
-
             reason_runs = _learner_followup_runs(r, agg, fb_pairs, fb_ratings)
             if not reason_runs:
                 continue                        # performing fine -> not on the list
+            flagged.append((r, cn, ct, sid, agg_key, reason_runs))
+        group_n = {}
+        for _r, cn, ct, _s, _k, _rr in flagged:
+            group_n[(cn, ct)] = group_n.get((cn, ct), 0) + 1
 
-            if (cn, ct) != banner_group:        # lazy technology banner
+        # Pass 2 — render
+        banner_group = None
+        alt_i = 0
+        for r, cn, ct, sid, agg_key, reason_runs in flagged:
+            if (cn, ct) != banner_group:        # technology banner (once per group)
                 banner_group = (cn, ct)
                 alt_i = 0
-                banner = f"{cn}  —  {ct}" if ct else f"{cn}"
+                n_grp = group_n[(cn, ct)]
+                banner = (f"Tech Name: {cn}   ·   Duration: {ct}" if ct else f"Tech Name: {cn}")
+                banner += f"   ·   {n_grp} learner{'s' if n_grp != 1 else ''} pending follow-up"
                 row_num = ds_section(ws, row_num, N, banner, level=1)
 
             status = str(r.get("status", ""))
@@ -2220,9 +2291,8 @@ def build_student_detail_ext(ws, att_daily: pd.DataFrame, susp_daily: pd.DataFra
             level = ("high" if (_rk and _rk <= 3) else "medium" if (_rk and _rk <= 6) else "info")
             ds_priority(ws, row_num, _C["Rank"], _rk if _rk else "—", level)
 
-            for col, v in enumerate([r.get("course_name", ""), r.get("course_title", ""),
-                                     r.get("student_name", ""), r.get("phone", "")], 2):
-                ds_cell(ws, row_num, col, v, bg=row_bg, bold=(col == _C["Student Name"]))
+            ds_cell(ws, row_num, _C["Student Name"], r.get("student_name", ""), bg=row_bg, bold=True)
+            ds_cell(ws, row_num, _C["Phone"], r.get("phone", ""), bg=row_bg)
 
             ds_pill(ws, row_num, _C["Status"], status_disp,
                     "high" if status == "Absent" else "ok")
@@ -2270,14 +2340,15 @@ def build_student_detail_ext(ws, att_daily: pd.DataFrame, susp_daily: pd.DataFra
     ds_guide_count(ws, "Learners needing follow-up", n_rows)
 
     ds_finish(ws, HDR_ROW, N, widths={
-        "Rank": 7, "Tech Name": 22, "Duration": 26, "Student Name": 22, "Phone": 15,
+        "Rank": 7, "Student Name": 22, "Phone": 15,
         "Status": 12, "Attendance %": 12, "Duration (min)": 10, "Joined At": 19, "Left At": 19,
         "Remarks": 12, "Feedback Given?": 11, "Feedback Rating (/10)": 10,
         "Sessions (P/T)": 10, "Agg Attendance %": 11, "Agg Duration Att %": 11,
         "Last Present": 12, "Absent Streak": 9, "Feedbacks": 9, "Feedback Part. %": 10,
         "Avg Rating (/10)": 9, "Overall Remarks": 14,
     }, why_col=_C["Why Flagged"], why_width=62, default_width=11, tab_color=DS_SECTION,
-       followup=(_C["Action Taken"], FOLLOWUP_ACTIONS["attendance"]))
+       followup=(_C["Action Taken"], FOLLOWUP_ACTIONS["attendance"]),
+       freeze_after_col=_C["Phone"])
     return ws
 
 
@@ -2299,9 +2370,40 @@ def _find_or_create_folder(drive, parent_id, name):
     return f["id"]
 
 
-def upload_report(folder_name: str, filename: str, buf: io.BytesIO, base_prefix: str) -> str:
+def _drive_client():
+    """Impersonated Drive v3 client (drive scope) — the identity that owns the
+    Coordinator report folders."""
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build as gbuild
+    creds = service_account.Credentials.from_service_account_file(
+        AR.SERVICE_ACCOUNT_FILE, scopes=["https://www.googleapis.com/auth/drive"]
+    ).with_subject(IMPERSONATE_USER)
+    return gbuild("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+def _list_children(drive, parent_id, folders_only=False):
+    """All (non-trashed) children of a Drive folder: [{id, name, mimeType,
+    createdTime, modifiedTime}], following pagination."""
+    q = f"'{parent_id}' in parents and trashed=false"
+    if folders_only:
+        q += " and mimeType='application/vnd.google-apps.folder'"
+    out, token = [], None
+    while True:
+        res = drive.files().list(q=q, fields="nextPageToken, files(id,name,mimeType,createdTime,modifiedTime)",
+                                 pageSize=1000, pageToken=token, supportsAllDrives=True,
+                                 includeItemsFromAllDrives=True).execute()
+        out += res.get("files", [])
+        token = res.get("nextPageToken")
+        if not token:
+            return out
+
+
+def upload_report(folder_name, filename: str, buf: io.BytesIO, base_prefix: str) -> str:
     """Create <parent>/<folder_name>/ and drop the workbook there as a native
-    Google Sheet (converted on upload). Existing reports for this report/date are
+    Google Sheet (converted on upload). `folder_name` is one folder name or a
+    sequence of nested names — the Coordinator layout passes
+    (report-type folder, reporting-period folder) from coordinator_periods.
+    Existing reports for this report/date are
     NEVER overwritten or modified — the Coordinator may have added manual follow-up
     comments to them. If a report with this base_prefix already exists in the
     folder, the new run is saved as the next version instead:
@@ -2311,16 +2413,12 @@ def upload_report(folder_name: str, filename: str, buf: io.BytesIO, base_prefix:
     Every previous version is kept unchanged. base_prefix scopes this per report
     type, so each type versions independently and other reports are untouched."""
     import re
-    from google.oauth2 import service_account
-    from googleapiclient.discovery import build as gbuild
     from googleapiclient.http import MediaIoBaseUpload
 
-    creds = service_account.Credentials.from_service_account_file(
-        AR.SERVICE_ACCOUNT_FILE, scopes=["https://www.googleapis.com/auth/drive"]
-    ).with_subject(IMPERSONATE_USER)
-    drive = gbuild("drive", "v3", credentials=creds, cache_discovery=False)
-
-    folder_id = _find_or_create_folder(drive, PARENT_FOLDER_ID, folder_name)
+    drive = _drive_client()
+    names = [folder_name] if isinstance(folder_name, str) else list(folder_name)
+    folder_id = CP.resolve_folder(drive, PARENT_FOLDER_ID, names, _find_or_create_folder)
+    folder_name = "/".join(names)
     drive_name = filename[:-5] if filename.lower().endswith(".xlsx") else filename
     base = base_prefix.replace("'", "\\'")
     q = f"'{folder_id}' in parents and name contains '{base}' and trashed=false"
@@ -2363,32 +2461,50 @@ def _enable_followup_timestamps(spreadsheet_id: str) -> None:
     Best-effort: a failure is logged with the manual fix and never blocks the run."""
     if not spreadsheet_id:
         return
-    try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build as gbuild
-        creds = service_account.Credentials.from_service_account_file(
-            AR.SERVICE_ACCOUNT_FILE,
-            scopes=["https://www.googleapis.com/auth/spreadsheets"]).with_subject(IMPERSONATE_USER)
-        sheets = gbuild("sheets", "v4", credentials=creds, cache_discovery=False)
-        sheets.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": [{
-            "updateSpreadsheetProperties": {
-                "properties": {
-                    "timeZone": FOLLOWUP_TIMEZONE,
-                    "iterativeCalculationSettings": {"maxIterations": 1,
-                                                     "convergenceThreshold": 0.0}},
-                "fields": "timeZone,iterativeCalculationSettings"}}]}).execute()
-        log.info("Follow-up DateTime enabled on the sheet (iterative calculation on, tz=%s).",
-                 FOLLOWUP_TIMEZONE)
-    except Exception as exc:                                   # noqa: BLE001
-        log.warning("Could not enable iterative calculation on the uploaded sheet (%s). "
-                    "Follow-Up DateTime will show a circular-reference error until it is "
-                    "switched on by hand: File ▸ Settings ▸ Calculation ▸ Iterative "
-                    "calculation = On.", exc)
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build as gbuild
+    body = {"requests": [{"updateSpreadsheetProperties": {
+        "properties": {"timeZone": FOLLOWUP_TIMEZONE,
+                       "iterativeCalculationSettings": {"maxIterations": 1,
+                                                        "convergenceThreshold": 0.0}},
+        "fields": "timeZone,iterativeCalculationSettings"}}]}
+    # The Sheets API accepts the Drive scope, so the FIRST attempt uses exactly the
+    # credentials the upload itself used (impersonated, drive scope) — no extra
+    # domain-wide-delegation scope is needed. Fallback: the plain service account
+    # (works when the coordinator folder is shared with it).
+    attempts = [
+        ("impersonated " + IMPERSONATE_USER,
+         lambda: service_account.Credentials.from_service_account_file(
+             AR.SERVICE_ACCOUNT_FILE, scopes=["https://www.googleapis.com/auth/drive"]
+         ).with_subject(IMPERSONATE_USER)),
+        ("service account",
+         lambda: service_account.Credentials.from_service_account_file(
+             AR.SERVICE_ACCOUNT_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets"])),
+    ]
+    errors = []
+    for who, make_creds in attempts:
+        try:
+            sheets = gbuild("sheets", "v4", credentials=make_creds(), cache_discovery=False)
+            sheets.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
+            log.info("Follow-up DateTime enabled on the sheet as %s (iterative calculation "
+                     "on, tz=%s).", who, FOLLOWUP_TIMEZONE)
+            return
+        except Exception as exc:                               # noqa: BLE001
+            errors.append(f"{who}: {exc}")
+    bar = "!" * 70
+    log.warning("%s\nFOLLOW-UP DATETIME NOT ENABLED on the uploaded sheet — its cells will "
+                "show #REF! (circular dependency) until iterative calculation is switched "
+                "on by hand: open the sheet ▸ File ▸ Settings ▸ Calculation ▸ Iterative "
+                "calculation = On (Max iterations 1), then clear and re-select Follow-Up "
+                "Done? on any row already marked.\nAttempts: %s\n%s",
+                bar, " | ".join(errors), bar)
 
 
 def upload_datewise(report_date: date, filename: str, buf: io.BytesIO) -> str:
-    """Daily report → <parent>/YYYY-MM-DD/ (thin wrapper over upload_report)."""
-    return upload_report(report_date.strftime("%Y-%m-%d"), filename, buf, REPORT_BASENAME)
+    """Daily report → <parent>/Daily Coordinator Reports/Daily DD-Mon-YYYY/
+    (the shared Coordinator layout; thin wrapper over upload_report)."""
+    return upload_report(CP.folder_path("Daily", report_date, report_date),
+                         filename, buf, REPORT_BASENAME)
 
 
 # =============================================================================
@@ -2733,11 +2849,11 @@ def _generate_period(service, report_type, start, end, plabel,
     base = f"IntelliBI_Batch_Coordinator_{report_type.title()}_Follow_Ups"
     safe = plabel.replace(" ", "_").replace("–", "to").replace("/", "-").replace(":", ".")
     filename = f"{base}_{safe}.xlsx"
-    # Save Weekly / Monthly / Manual roll-ups INSIDE the run's date-wise folder
-    # (the report-generation date, same folder the Daily report uses), as separate
-    # files — no separate Weekly/Monthly folder. File name is unchanged; the
-    # per-report base_prefix keeps each report type replacing only its own file.
-    folder = gen_date.strftime("%Y-%m-%d")
+    # Save Weekly / Monthly / Manual roll-ups in the shared Coordinator layout:
+    # <parent>/<Type> Coordinator Reports/<reporting-period folder>/ — the same
+    # folder the Task Performance report for this type + period uses. File name
+    # is unchanged; the per-report base_prefix keeps versioning per report type.
+    folder = CP.folder_path(report_type.title(), start, end)
     link = upload_report(folder, filename, buf, base)
     print(f"\n{'='*64}\n  Batch Coordinator {report_type.title()} Follow-Ups — {plabel}")
     print(f"  Period sessions: {0 if sess_p is None else len(sess_p)} | Agg groups: {len(agg_map)}")
@@ -3347,7 +3463,8 @@ def _iv_finish(ws, row_num):
         "Interview Time": 32, "Batch Name (Class)": 20, "Batch Title / Duration": 28,
         "Candidate Name": 28, "Phone": 16,
     }, why_col=_IVC["Why Flagged"], why_width=66, default_width=16, tab_color=DS_SECTION,
-       followup=(_IVC["Action Taken"], FOLLOWUP_ACTIONS["interview"]))
+       followup=(_IVC["Action Taken"], FOLLOWUP_ACTIONS["interview"]),
+       freeze_after_col=_IVC["Phone"])
 
 
 def build_interview_reminders(ws, sheets, drive, service, att_agg,
@@ -3657,6 +3774,7 @@ def generate():
                     sess_agg, att_agg, fb_agg, tf_agg, susp_agg, today))
         except Exception as _je:
             log.exception("Report job %s failed: %s", j, _je)
+            results.append({"failed": True, "job": str(j), "error": str(_je)})
     return results
 
 
@@ -3667,4 +3785,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Non-zero exit when any planned report failed, so the Operations pipeline
+    # (scripts/run_reports_action.py) records the failure and retries/alerts.
+    _res = main()
+    sys.exit(1 if any(isinstance(r, dict) and r.get("failed") for r in (_res or [])) else 0)

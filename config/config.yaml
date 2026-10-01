@@ -65,3 +65,12 @@ pipeline:
 #    pyStudentProfileReport : uses the DIGITAL Gmail sender (intellibidigital@gmail.com); admin master workbook e-mail
 #    Report SEND_EMAIL / recipients / CC / BCC live at the top of each report script.
 # -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+#  Network
+# -----------------------------------------------------------------------------
+network:
+  force_ipv4: true                   # resolve API hosts to IPv4 only. Fixes runs that die
+                                     # with "WinError 10060" on networks (phone hotspots, some
+                                     # Wi-Fi) whose IPv6 does not route: the Google client
+                                     # library does not fall back to IPv4 by itself.
