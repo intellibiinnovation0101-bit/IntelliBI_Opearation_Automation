@@ -38,7 +38,7 @@ for p in ("common", "ops_reports_action", "co-ordinator reports", "scripts"):
 
 import smtplib                                        # noqa: E402
 import openpyxl                                       # noqa: E402
-import pyBatchCoordinatorDailyAttendanceReport as BC  # noqa: E402
+import pyCoordinatorTaskListReport as BC  # noqa: E402
 import pyCoordinatorTaskPerformanceReport as P        # noqa: E402
 
 FAIL = []

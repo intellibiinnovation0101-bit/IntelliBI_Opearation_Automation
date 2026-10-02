@@ -1,4 +1,6 @@
-# pyBatchCoordinatorDailyAttendanceReport.py
+# pyCoordinatorTaskListReport.py
+
+*Formerly `pyBatchCoordinatorDailyAttendanceReport.py`, renamed 2026-10-01. Only the file name changed; the Drive report name `IntelliBI_Batch_Coordinator_Daily_Attendance_Report`, the e-mail subject and the morning-batch job label "Batch Coordinator Daily Report" are unchanged, so earlier reports, versioning and the Task Performance report keep working.*
 
 Location: `co-ordinator reports/`. Output: `IntelliBI_Batch_Coordinator_Daily_Attendance_Report_<window>` (native Google Sheet) plus Weekly / Monthly / Manual roll-ups, saved in the shared Coordinator layout (see **Drive layout & scheduling** below). Runs in the Operations **Morning batch** (`scripts/run_reports_action.py`).
 
@@ -47,6 +49,31 @@ Every daily tab ends with four teal input columns the coordinator fills in on th
 
 How the timestamp works: the cell holds `=IF(Done="","",IF(ISERROR(DT),NOW(),IF(OR(DT="",DT=0),NOW(),DT)))` — a self-referencing formula that only evaluates `NOW()` while the cell is still empty. It needs *iterative calculation* to be on, so the script (a) sets it in the workbook (`ds_enable_iterative_calc`, for Excel) and (b) after the upload calls the Sheets API once per file (`_enable_followup_timestamps`) to switch iterative calculation on and pin the sheet's time zone to `Asia/Kolkata` — first with the same impersonated Drive-scope credentials the upload used (the Sheets API accepts the Drive scope, so no extra domain-wide-delegation scope is required), then with the plain service account. If both fail the console shows a loud `FOLLOW-UP DATETIME NOT ENABLED` warning and the fix is manual: File ▸ Settings ▸ Calculation ▸ Iterative calculation = On (Max iterations 1), then clear and re-select Follow-Up Done? on rows already marked. A `#REF!` in the column means exactly that: iterative calculation is off on that sheet. Dropdowns are standard list data validations (they survive the xlsx → Google Sheets conversion). Only flagged rows carry the input cells; banners and empty-state rows do not.
 
+## Sheet access & protection
+Every sheet this script uploads (Daily, re-run versions, Weekly / Monthly / Manual roll-ups) is locked straight after upload by `protect_and_share()`. Settings sit at the top of the script:
+
+| Setting | Value |
+|---|---|
+| `PROTECT_SHEETS` | `True` (set `False` to upload exactly as before, with no protection and no extra share) |
+| `COORDINATOR_EDITOR` | `intellibihropsb2ch@gmail.com` |
+| `SHEET_FULL_CONTROL` | `[IMPERSONATE_USER]` (info@, the owner). The pipeline service account from `service_account.json` is added automatically. |
+| `COORDINATOR_EDITABLE` | Action Taken, Follow-Up Comment, Follow-Up Done? |
+
+What happens, in order:
+1. **Find the input cells.** `followup_input_ranges()` reads the workbook just uploaded. Every follow-up row carries the self-stamping Follow-Up DateTime formula, and its three input cells are the three columns to its left. Headers, banners, empty-state rows and Follow-Up DateTime are never included.
+2. **Protect every tab.** One atomic Sheets `batchUpdate` adds, per tab, a protected range over the **whole tab** (`warningOnly: false`). Only info@ and the service account are its editors, and the follow-up input cells are its `unprotectedRanges`. Because the whole tab is protected, nobody else can insert or delete rows or columns, rename or delete the tab, edit headers, data or Follow-Up DateTime, or change the protection. Tabs without follow-ups (period roll-ups, for example) are fully read-only for the Coordinator. The batch first removes any earlier protection with the same description, so re-applying never duplicates it.
+3. **Check it.** The protections are read back. Each tab must have exactly one, not warning-only, covering the whole tab, with the expected number of editable ranges.
+4. **No re-sharing.** `writersCanShare = false` on the file, so editors cannot share it or change its permissions.
+5. **Share.** Only now does `intellibihropsb2ch@gmail.com` get **Editor** on the file, with no notification e-mail.
+
+Dropdowns and the Follow-Up DateTime stamp keep working. Data validation stays on the editable cells, and the protected DateTime formula still recalculates when Follow-Up Done? changes. Transient Google errors are retried (`common/api_retry.py`). If any step still fails, the console shows `SHEET NOT PROTECTED / NOT SHARED FOR EDITING` and `[protect] FAILED — …`, and the run summary carries a note. The Coordinator is **not** given edit access to that sheet: they keep the folder's view access. The report itself is still uploaded and e-mailed. Earlier sheets are never modified.
+
+Things to know:
+- Any **other** editor of the Coordinator folder (for example `intellibiinnovation0101@gmail.com`) is limited exactly like the Coordinator on these sheets. Add them to `SHEET_FULL_CONTROL` if they need full control.
+- Editors can still add a new tab of their own and use filter views. Google does not allow blocking those through protection.
+- The owner sees protected ranges under Data ▸ Protect sheets and ranges, described "IntelliBI Coordinator task list - protected (automation)".
+- Checked offline by `ops_validation/verify_coordinator_sheet_protection.py`, which tests every cell of real report tabs for the Coordinator, the owner and the service account.
+
 ## E-mail
 One e-mail **per generated report** goes from `info@intellibiinnovationstechnologies.in` to `info@intellibiinnovationstechnologies.in` and `intellibihropsb2ch@gmail.com`. The subject is `<Type> Batch Coordinator Report - <period>`.
 - The layout follows the Sales lead-performance e-mail.
@@ -61,6 +88,7 @@ One e-mail **per generated report** goes from `info@intellibiinnovationstechnolo
 Google Drive is the only place this report is stored. Every workbook (Daily, Weekly, Monthly, Manual) is built in an in-memory buffer and uploaded from it (`upload_report()` → `MediaIoBaseUpload`). Nothing is written to `output/reports/` or to any temporary file, and the e-mail carries the Google Sheet link, not an attachment. `ops_validation/verify_coordinator_email_dashboard.py` checks this.
 
 ## Change history
+- 2026-10-01 — **Renamed** from `pyBatchCoordinatorDailyAttendanceReport.py` to `pyCoordinatorTaskListReport.py`, with every reference updated (scheduler job, performance-report import, verify scripts, run summary, docs, shared `gmail_star`) and the logger renamed `CoordinatorTaskList`. **Sheet access & protection** added (`protect_and_share`, see above): `intellibihropsb2ch@gmail.com` can edit only Action Taken / Follow-Up Comment / Follow-Up Done?, and everything else is protected for everyone but info@ and the service account. Report content, task logic, Drive name and layout, versioning and e-mail are unchanged.
 - 2026-10-01 — Reviewed the storage flow: already Drive-only (in-memory build and upload, no local or temporary file). No code change; documented above and covered by the verify script.
 - 2026-10-02 — E-mail added (`SEND_EMAIL`, `EMAIL_SENDER`, `EMAIL_RECIPIENTS`). Task generation, Drive layout and versioning unchanged.
 - 2026-10-01 — Shared Coordinator Drive layout (Daily / Weekly / Monthly / Manual → reporting-period folder) via `coordinator_periods.py`; `upload_report()` takes nested folder names; `_drive_client()` / `_list_children()` helpers; non-zero exit on a failed report; added to the Morning batch. Task-generation logic unchanged.

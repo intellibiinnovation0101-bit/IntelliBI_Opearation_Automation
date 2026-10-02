@@ -2,7 +2,7 @@
 Verification of pyCoordinatorTaskPerformanceReport.py (run from the project root:
   python ops_validation\\verify_coordinator_task_performance.py).
 
-Builds REAL Coordinator task tabs with pyBatchCoordinatorDailyAttendanceReport's own
+Builds REAL Coordinator task tabs with pyCoordinatorTaskListReport's own
 builders (Admission Formalities, Assignment Follow-Ups, Wise Validation), fills the
 follow-up columns the way the Coordinator would, across two report days and several
 report versions, and checks the performance ledger against hand-computed answers:
@@ -34,7 +34,7 @@ for p in ("common", "ops_reports_action", "co-ordinator reports"):
     sys.path.insert(0, os.path.join(ROOT, p))
 
 import openpyxl                                          # noqa: E402
-import pyBatchCoordinatorDailyAttendanceReport as BC     # noqa: E402  (the live task report)
+import pyCoordinatorTaskListReport as BC     # noqa: E402  (the live task report)
 import pyCoordinatorTaskPerformanceReport as P           # noqa: E402  (the new report)
 
 FAIL = []

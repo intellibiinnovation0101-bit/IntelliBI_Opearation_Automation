@@ -5,7 +5,7 @@ These report e-mails are starred automatically once they are sent:
 | Project | Script | Subject |
 |---|---|---|
 | Operations | `co-ordinator reports/pyCoordinatorTaskPerformanceReport.py` | `<Type> Coordinator Task Performance Report - <period>` |
-| Operations | `co-ordinator reports/pyBatchCoordinatorDailyAttendanceReport.py` | `<Type> Batch Coordinator Report - <period>` |
+| Operations | `co-ordinator reports/pyCoordinatorTaskListReport.py` | `<Type> Batch Coordinator Report - <period>` |
 | Sales | `sales_reports/pyConsolidatedLeadPerformanceReport.py` | `<Type> Lead Report - <period>` |
 | Sales | `sales_reports/pyLeadFollowUpAnalysisReport.py` | `<Type> Lead Follow-Up Analysis Report - <period>` |
 

@@ -112,7 +112,7 @@ assert rows[("Python", "Instructor 3")][3:6] == [1, 0, 1]
 print("[pass] period Teacher Feedback Status uses the same rule")
 
 # ── 5. Batch Coordinator report uses the SAME helper (no second definition) ──
-bc = open(os.path.join(ROOT, "co-ordinator reports", "pyBatchCoordinatorDailyAttendanceReport.py"),
+bc = open(os.path.join(ROOT, "co-ordinator reports", "pyCoordinatorTaskListReport.py"),
           encoding="utf-8").read()
 assert bc.count("AR.teacher_feedback_session_ids(") == 2, "daily + period Instructor Follow-Ups must both use the shared rule"
 assert 'set(tf_daily["session_id"]' not in bc and 'set(tf_period["session_id"]' not in bc

@@ -31,7 +31,7 @@
       Batch Coordinator report and the Task Performance report for the same type
       and period always land in the SAME folder. Folders are resolved by name at
       run time (created when missing); files inside are versioned by the existing
-      no-overwrite upload (pyBatchCoordinatorDailyAttendanceReport.upload_report).
+      no-overwrite upload (pyCoordinatorTaskListReport.upload_report).
 
   Legacy layout: reports created before this change sit directly in
   <root>/YYYY-MM-DD/. They are still read by the performance report, and can be
@@ -272,7 +272,7 @@ def migrate_legacy(apply: bool = False):
     'Coordinator Performance' folder) into the Daily / Weekly / Monthly / Manual
     hierarchy. Files are MOVED (same file id → existing links keep working),
     never copied or deleted. Dry run unless apply=True."""
-    import pyBatchCoordinatorDailyAttendanceReport as BC
+    import pyCoordinatorTaskListReport as BC
     drive = BC._drive_client()
     folders = BC._list_children(drive, BC.PARENT_FOLDER_ID, folders_only=True)
     sources = [f for f in folders

@@ -230,7 +230,7 @@ check("missing Message-ID → False, no IMAP session",
 
 # =============================================================================
 print("\n== 2. Coordinator Task Performance report (REAL generate()) ==")
-import pyBatchCoordinatorDailyAttendanceReport as BC  # noqa: E402
+import pyCoordinatorTaskListReport as BC  # noqa: E402
 import pyCoordinatorTaskPerformanceReport as P        # noqa: E402
 
 check("STAR_EMAIL_IN_GMAIL default True in both scripts", (P.STAR_EMAIL_IN_GMAIL, BC.STAR_EMAIL_IN_GMAIL),

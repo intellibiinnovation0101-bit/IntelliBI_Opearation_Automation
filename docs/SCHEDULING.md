@@ -90,4 +90,5 @@ Manual test without the scheduler:
 ## Change history
 - 2026-08-24 — Added scheduling (10:00 normal + 11:00/12:00 retry-until-success, once per day, overlap-protected) via `run_scheduled.py` + `setup_schedule.ps1`.
 - 2026-10-01 — Added the Batch Coordinator report to the morning batch (Layer 2) and the evening batch (19:00 + 20:00 retry, `run_evening_reports.py`, Coordinator Task Performance report); `run_scheduled.py` gained `--entry`. Re-run `setup_schedule.ps1` as Administrator to apply.
+- 2026-10-01 — The Batch Coordinator report script was renamed `pyCoordinatorTaskListReport.py` (formerly `pyBatchCoordinatorDailyAttendanceReport.py`). The morning-batch job runs it under the same label "Batch Coordinator Daily Report". No Task Scheduler change: the tasks call `run_scheduled.py`, not the script.
 - 2026-09-11 — Changed schedule to 10:30 normal + 11:30 retry (removed 12:00), staggered off the Sales schedule so the two projects never run at the same time. Re-run `setup_schedule.ps1` as Administrator to apply.

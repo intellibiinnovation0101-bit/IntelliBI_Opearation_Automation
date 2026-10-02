@@ -6,7 +6,7 @@ scheduling (run from the project root:
 No Google access: an in-memory Drive stands in for the real one, and the REAL
 code paths are exercised —
   coordinator_periods.plan_jobs / folder_path          (period selection, folders)
-  pyBatchCoordinatorDailyAttendanceReport.upload_report (versioned upload)
+  pyCoordinatorTaskListReport.upload_report (versioned upload)
   pyCoordinatorTaskPerformanceReport discover → load → ledger → scope → upload
   scripts/run_reports_action.JOBS / script_path, scripts/run_scheduled.py
 Covers: Daily / Weekly / Monthly / Manual, AUTO and flag mode, Monday weekly,
@@ -35,7 +35,7 @@ for p in ("common", "ops_reports_action", "co-ordinator reports", "scripts"):
 
 import openpyxl                                          # noqa: E402
 import coordinator_periods as CP                         # noqa: E402
-import pyBatchCoordinatorDailyAttendanceReport as BC     # noqa: E402
+import pyCoordinatorTaskListReport as BC     # noqa: E402
 import pyCoordinatorTaskPerformanceReport as P           # noqa: E402
 
 FAIL = []
@@ -222,6 +222,7 @@ class FakeDrive:
 drive = FakeDrive(BC.PARENT_FOLDER_ID)
 BC._drive_client = lambda: drive
 BC._enable_followup_timestamps = lambda sid: None
+BC.PROTECT_SHEETS = False            # protection is checked in verify_coordinator_sheet_protection.py
 P._drive_service = lambda: drive
 P._call = lambda fn, what: fn()
 _cache = tempfile.mkdtemp(prefix="coord_cache_")
@@ -392,7 +393,7 @@ check("unrelated files stay put",
 
 print("\n== 7. Scheduler integration ==")
 import run_reports_action as RRA                                    # noqa: E402
-bc_job = [j for j in RRA.JOBS if j[0] == "pyBatchCoordinatorDailyAttendanceReport"]
+bc_job = [j for j in RRA.JOBS if j[0] == "pyCoordinatorTaskListReport"]
 check("Batch Coordinator report is in the Morning batch (Layer 2)", len(bc_job), 1)
 check("… gated on all four Layer-1 refreshes", sorted(bc_job[0][2]),
       sorted(["pyAssignmentSubmissions", "pySessionAttendanceStudentTeacherFeedbacks",

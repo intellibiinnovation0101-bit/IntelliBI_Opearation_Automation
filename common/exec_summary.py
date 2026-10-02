@@ -47,7 +47,7 @@ TITLES = {
     "pyAdmissionFormalitiesReport": "Admission Formalities Report",
     "pyStudentAdditionalNote": "Student Additional Note",
     "pyWiseDataValidationReport": "Wise Data Validation Report",
-    "pyBatchCoordinatorDailyAttendanceReport": "Batch Coordinator Report",
+    "pyCoordinatorTaskListReport": "Batch Coordinator Report",
     # ── Operations — Evening batch ──────────────────────────────────────────
     "pyCoordinatorTaskPerformanceReport": "Coordinator Task Performance",
     # ── Sales ───────────────────────────────────────────────────────────────
@@ -147,10 +147,13 @@ _R = {
         {"k": "last", "label": "Instructor records flagged",
          "re": r"\[Validate\]\s*Instructors\s*->[^\n]*invalid=(\d+)", "zero": "keep"},
     ],
-    "pyBatchCoordinatorDailyAttendanceReport": [
+    "pyCoordinatorTaskListReport": [
         {"k": "count", "label": "Reports uploaded", "re": r"Uploaded native Google Sheet", "zero": "keep"},
         {"k": "last", "label": "Daily attendance rows", "re": r"Daily rows:\s*(\d+)"},
+        {"k": "count", "label": "Sheets protected & shared", "re": r"\[protect\] ✓"},
         {"k": "flag", "label": "E-mailed", "re": r"\[Email\] ✓ sent", "yes": "Yes", "no": "No"},
+        {"k": "note_if", "re": r"\[protect\] FAILED",
+         "note": "A sheet could NOT be protected — Coordinator edit access was not granted on it (see log)"},
     ],
     "pyCoordinatorTaskPerformanceReport": [
         {"k": "count", "label": "Reports uploaded", "re": r"\[Drive\] Uploaded:", "zero": "keep"},

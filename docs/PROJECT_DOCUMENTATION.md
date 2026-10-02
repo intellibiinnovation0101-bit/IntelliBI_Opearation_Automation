@@ -43,7 +43,7 @@ Layer 2  ops_reports_action       reports/actions in PARALLEL where safe;
 | `pyStudentProfileReport.py` | SessionAttendance, AssignmentSubmissions, StudentPayment |
 | `pyAdmissionFormalitiesReport.py` | StudentPayment, ZohoSignatureStatus |
 | `pyStudentAdditionalNote.py` | *(independent)* |
-| `co-ordinator reports/pyBatchCoordinatorDailyAttendanceReport.py` | SessionAttendance, StudentPayment, AssignmentSubmissions, ZohoSignatureStatus |
+| `co-ordinator reports/pyCoordinatorTaskListReport.py` | SessionAttendance, StudentPayment, AssignmentSubmissions, ZohoSignatureStatus |
 
 Evening batch (`scripts/run_evening_reports.py`, 19:00): `co-ordinator reports/pyCoordinatorTaskPerformanceReport.py`.
 
@@ -57,7 +57,7 @@ Per-script docs are in `docs/ops_data_collection/` and `docs/ops_reports_action/
 IntelliBI_Operations_Automation/
 ├── ops_data_collection/     Layer 1 entry scripts
 ├── ops_reports_action/      Layer 2 entry scripts
-├── co-ordinator reports/    pyBatchCoordinatorDailyAttendanceReport.py — Batch Coordinator daily / period action lists
+├── co-ordinator reports/    pyCoordinatorTaskListReport.py — Batch Coordinator daily / period action lists
 │                            pyCoordinatorTaskPerformanceReport.py — Coordinator completion & timeliness (evening)
 │                            coordinator_periods.py — shared periods + Drive layout (Daily/Weekly/Monthly/Manual)
 ├── ops_validation/          verify_*.py — offline verification (attendance reconcile, instructor-feedback detection)

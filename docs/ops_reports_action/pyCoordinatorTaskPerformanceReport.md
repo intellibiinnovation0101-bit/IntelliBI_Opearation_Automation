@@ -6,10 +6,10 @@ Location: `co-ordinator reports/`. Output: `IntelliBI_Coordinator_Task_Performan
 Management view of the Batch Coordinator's **task completion and timeliness**:
 Tasks Generated → Completed → Pending → Completion % → Timely Completion % → progress over time → overall status. It covers all task groups together and each group separately.
 
-The report is **read-only**. It changes nothing in `pyBatchCoordinatorDailyAttendanceReport.py`, its tabs, its follow-up columns or its versioning.
+The report is **read-only**. It changes nothing in `pyCoordinatorTaskListReport.py`, its tabs, its follow-up columns or its versioning.
 
 ## Intended rhythm & scheduling
-1. **Morning batch (10:30, retry 11:30):** `pyBatchCoordinatorDailyAttendanceReport` builds the day's task list as part of `scripts/run_all.py`. The Coordinator works through it, filling Action Taken / Comment / Done?. Follow-Up DateTime stamps itself.
+1. **Morning batch (10:30, retry 11:30):** `pyCoordinatorTaskListReport` builds the day's task list as part of `scripts/run_all.py`. The Coordinator works through it, filling Action Taken / Comment / Done?. Follow-Up DateTime stamps itself.
 2. **Evening batch (19:00, retry 20:00):** `scripts/run_evening_reports.py` runs this report. Both batches are registered by `scripts/setup_schedule.ps1` and run through `scripts/run_scheduled.py`, which provides the lock, the once-per-day success marker (label `ops_evening`) and the summary e-mail. `scripts/status.ps1` shows both tasks.
 
 ## Report periods (configuration at the top of the script)
@@ -137,7 +137,7 @@ Settings are at the top of the script: `GENERATE_*` and the period dates, `UPLOA
 Exit code: 0 when every planned report was delivered. 1 when a report failed (the other reports still run) or the configuration is invalid.
 
 ## Reuse
-- Folder, file-name prefix, follow-up column names, banner colours, the `ds_*` design system and the versioned `upload_report()` all come from `pyBatchCoordinatorDailyAttendanceReport` (imported as `BC`). If those change there, this report follows.
+- Folder, file-name prefix, follow-up column names, banner colours, the `ds_*` design system and the versioned `upload_report()` all come from `pyCoordinatorTaskListReport` (imported as `BC`). If those change there, this report follows.
 - Retries use `common/api_retry.py`.
 
 ## Verification (no Google access needed)

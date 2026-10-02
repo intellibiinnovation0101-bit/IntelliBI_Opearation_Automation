@@ -5,7 +5,7 @@
   Shared by the report scripts that opt in (the SAME file is kept in the Sales
   and the Operations projects):
       Operations  co-ordinator reports/pyCoordinatorTaskPerformanceReport.py
-                  co-ordinator reports/pyBatchCoordinatorDailyAttendanceReport.py
+                  co-ordinator reports/pyCoordinatorTaskListReport.py
                   (both through co-ordinator reports/coordinator_email.send)
       Sales       sales_reports/pyConsolidatedLeadPerformanceReport.py
                   sales_reports/pyLeadFollowUpAnalysisReport.py

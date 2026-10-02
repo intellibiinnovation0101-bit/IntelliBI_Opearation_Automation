@@ -16,7 +16,7 @@ scripts still run.
     pyAdmissionFormalitiesReport     <- StudentPayment, ZohoSignatureStatus
     pyStudentAdditionalNote          <- (independent)
     pyWiseDataValidationReport       <- StudentPayment
-    pyBatchCoordinatorDailyAttendanceReport   (co-ordinator reports/)
+    pyCoordinatorTaskListReport   (co-ordinator reports/)
                                      <- SessionAttendance, StudentPayment,
                                         AssignmentSubmissions, ZohoSignatureStatus
        The Coordinator's daily task list (Morning batch). Its evening companion,
@@ -57,7 +57,7 @@ JOBS = [
     # Batch Coordinator daily task list — reads attendance/feedback, students,
     # assignment submissions and admission (Zoho) data, so it waits for all four
     # Layer-1 refreshes and is skipped (never built on stale data) if one failed.
-    ("pyBatchCoordinatorDailyAttendanceReport", "Batch Coordinator Daily Report",
+    ("pyCoordinatorTaskListReport", "Batch Coordinator Daily Report",
         ["pySessionAttendanceStudentTeacherFeedbacks", "pyStudentPaymentClassesStudentEnrolled",
          "pyAssignmentSubmissions", "pyZohoSignatureStatusRefresh"]),
 ]

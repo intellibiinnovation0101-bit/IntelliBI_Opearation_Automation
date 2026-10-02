@@ -14,7 +14,7 @@ Layer 1  ops_data_collection    4 refresh jobs (parallel)
    |
 Layer 2  ops_reports_action     reports / reminders / actions (parallel where safe;
                                  a report whose Layer-1 dependency failed is skipped)
-         + co-ordinator reports/pyBatchCoordinatorDailyAttendanceReport.py
+         + co-ordinator reports/pyCoordinatorTaskListReport.py
                                  (the Coordinator's daily task list)
    ...
 Evening  scripts/run_evening_reports.py

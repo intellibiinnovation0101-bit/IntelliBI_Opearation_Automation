@@ -16,7 +16,7 @@
 
   SOURCE OF TRUTH  (read-only — nothing in the existing system is changed)
     The Batch Coordinator daily reports produced by
-    pyBatchCoordinatorDailyAttendanceReport.py are the ONLY place Coordinator
+    pyCoordinatorTaskListReport.py are the ONLY place Coordinator
     actions are recorded (Action Taken / Follow-Up Comment / Follow-Up Done? /
     Follow-Up DateTime). They live in
         <coordinator folder>/Daily Coordinator Reports/Daily DD-Mon-YYYY/
@@ -127,7 +127,7 @@ from openpyxl.chart import BarChart, LineChart, Reference
 # The Coordinator report is the task generator: its constants (folder, file
 # name, follow-up columns, banner colours) and its design system are reused so
 # this report can never drift from what the Coordinator actually sees.
-import pyBatchCoordinatorDailyAttendanceReport as BC
+import pyCoordinatorTaskListReport as BC
 import coordinator_periods as CP              # shared periods + Drive layout
 import coordinator_email as CE                # shared e-mail (Operations Gmail account)
 

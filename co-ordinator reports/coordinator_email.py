@@ -4,7 +4,7 @@
   COORDINATOR REPORT E-MAILS  (co-ordinator reports / coordinator_email.py)
   ------------------------------------------------------------------------------
   E-mail for the two Coordinator reports:
-      pyBatchCoordinatorDailyAttendanceReport.py   (task lists)
+      pyCoordinatorTaskListReport.py   (task lists)
       pyCoordinatorTaskPerformanceReport.py        (completion & timeliness)
 
   Modelled on the IntelliBI report e-mail already in production

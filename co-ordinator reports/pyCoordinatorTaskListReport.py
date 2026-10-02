@@ -2,7 +2,7 @@
 ================================================================================
   IntelliBI Operations Automation
   BATCH COORDINATOR — Daily Attendance Task Report
-  (co-ordinator reports / pyBatchCoordinatorDailyAttendanceReport.py)
+  (co-ordinator reports / pyCoordinatorTaskListReport.py)
   ------------------------------------------------------------------------------
   WHAT THIS IS
     A DAILY, technology-wise, student-level attendance report that EXTENDS the
@@ -58,7 +58,7 @@
                             column literally called "Remarks".
 
   RUN
-    python "co-ordinator reports/pyBatchCoordinatorDailyAttendanceReport.py"
+    python "co-ordinator reports/pyCoordinatorTaskListReport.py"
     Which reports run is set by the GENERATE_* flags in RUN CONFIGURATION below
     (GENERATE_AUTO picks Daily/Weekly/Monthly by the run date). Layer-1
     collectors must have run first.
@@ -84,6 +84,7 @@ except Exception:
     CREDENTIALS_DIR = os.path.join(_PROJECT, "credentials")
 
 import io
+import re
 import logging
 import calendar
 from datetime import datetime, date, timedelta, time, timezone
@@ -110,7 +111,7 @@ except Exception as _e:                      # pragma: no cover
     COORD = None
     _COORD_OK = False
 
-log = logging.getLogger("BatchCoordinatorDailyAttendance")
+log = logging.getLogger("CoordinatorTaskList")
 
 # =============================================================================
 #  RUN CONFIGURATION
@@ -122,6 +123,20 @@ IMPERSONATE_USER  = "info@intellibiinnovationstechnologies.in"
 #   IntelliBI_Batch_Coordinator_Daily_Attendance_Report_12-Sep-2026_10.00_AM_-_12-Sep-2026_03.00_PM
 REPORT_BASENAME   = "IntelliBI_Batch_Coordinator_Daily_Attendance_Report"
 VERBOSE           = True
+
+# ── Google Sheet access & protection (applied to every sheet this script uploads) ─
+# The Coordinator account may edit ONLY Action Taken / Follow-Up Comment /
+# Follow-Up Done? on the follow-up rows; everything else on every tab (headers,
+# data, the self-stamping Follow-Up DateTime formula, row/column structure, the
+# tabs themselves) is a protected range that only SHEET_FULL_CONTROL can change.
+# The owner (IMPERSONATE_USER, which creates the file) always keeps full control;
+# the pipeline service account is added automatically so automation never locks
+# itself out. Any OTHER editor of the folder is limited like the Coordinator.
+PROTECT_SHEETS          = True
+COORDINATOR_EDITOR      = "intellibihropsb2ch@gmail.com"   # gets edit access to the sheet
+SHEET_FULL_CONTROL      = [IMPERSONATE_USER]                # + the pipeline service account
+COORDINATOR_EDITABLE    = ["Action Taken", "Follow-Up Comment", "Follow-Up Done?"]
+PROTECTION_DESCRIPTION  = "IntelliBI Coordinator task list - protected (automation)"
 
 # ── E-mail (sent after the report(s) are generated) ─────────────────────────
 # True  → generate the report(s) and e-mail the Google Sheet link(s)
@@ -2463,6 +2478,8 @@ def upload_report(folder_name, filename: str, buf: io.BytesIO, base_prefix: str)
     link = up.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{up.get('id','')}/edit"
     log.info("Uploaded native Google Sheet → %s / %s", folder_name, target_name)
     _enable_followup_timestamps(up.get("id", ""))
+    if PROTECT_SHEETS:
+        protect_and_share(up.get("id", ""), buf.getvalue(), drive)
     return link
 
 
@@ -2511,6 +2528,166 @@ def _enable_followup_timestamps(spreadsheet_id: str) -> None:
                 "calculation = On (Max iterations 1), then clear and re-select Follow-Up "
                 "Done? on any row already marked.\nAttempts: %s\n%s",
                 bar, " | ".join(errors), bar)
+
+
+# ── Google Sheet access & protection ─────────────────────────────────────────
+_FU_DT_FORMULA = re.compile(r'^=IF\(([A-Z]+)(\d+)="","",IF\(ISERROR\(([A-Z]+)\2\)')
+
+
+def followup_input_ranges(xlsx_bytes) -> dict:
+    """{tab title: [(r0, r1, c0, c1), ...]} — the Coordinator-editable cells of the
+    workbook just uploaded, as 0-based half-open grid ranges (Sheets API style).
+    Found from the report itself: every follow-up row carries the self-stamping
+    Follow-Up DateTime formula written by ds_followup_cells(); its three input
+    cells (Action Taken, Follow-Up Comment, Follow-Up Done?) are the three
+    columns to its left. Consecutive rows are merged into one range."""
+    from openpyxl import load_workbook
+    from openpyxl.utils import column_index_from_string
+    wb = load_workbook(io.BytesIO(xlsx_bytes), data_only=False)
+    out = {}
+    for ws in wb.worksheets:
+        rows_by_col = {}
+        for row in ws.iter_rows():
+            for c in row:
+                v = c.value
+                if not (isinstance(v, str) and v.startswith("=IF(") and "NOW()" in v):
+                    continue
+                m = _FU_DT_FORMULA.match(v)
+                if not m or int(m.group(2)) != c.row or m.group(3) != c.column_letter \
+                        or column_index_from_string(m.group(1)) != c.column - 1:
+                    continue                               # not a follow-up DateTime cell
+                rows_by_col.setdefault(c.column, []).append(c.row)
+        ranges = []
+        for dt_col, rows in rows_by_col.items():
+            rows = sorted(set(rows))
+            start = prev = rows[0]
+            for r in rows[1:] + [None]:
+                if r is not None and r == prev + 1:
+                    prev = r
+                    continue
+                # 1-based rows start..prev, columns dt-3 .. dt-1  ->  0-based half-open
+                ranges.append((start - 1, prev, dt_col - 1 - len(COORDINATOR_EDITABLE), dt_col - 1))
+                if r is not None:
+                    start = prev = r
+        out[ws.title] = sorted(ranges)
+    return out
+
+
+def _service_account_email():
+    try:
+        import json
+        with open(AR.SERVICE_ACCOUNT_FILE, encoding="utf-8") as fh:
+            return json.load(fh).get("client_email", "")
+    except Exception:                                          # noqa: BLE001
+        return ""
+
+
+def _retry(fn, what):
+    try:
+        import api_retry                                       # common/api_retry.py
+        return api_retry.call_with_retry(fn, what, log=log.info)
+    except ImportError:                                        # pragma: no cover
+        return fn()
+
+
+def _apply_protection(sheets, spreadsheet_id, edit_ranges, editors) -> int:
+    """One attempt: read the tabs, (re)place OUR protection on every tab in ONE
+    atomic batchUpdate, read it back and check it. Safe to repeat — protections
+    carrying PROTECTION_DESCRIPTION are deleted in the same batch first, so a
+    retry after a lost response never leaves duplicates. Returns the tab count."""
+    meta = sheets.spreadsheets().get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets(properties(sheetId,title),protectedRanges(protectedRangeId,description))"
+    ).execute()
+    reqs, expected = [], {}
+    for sh in meta.get("sheets", []):
+        for pr in sh.get("protectedRanges", []) or []:
+            if pr.get("description") == PROTECTION_DESCRIPTION:
+                reqs.append({"deleteProtectedRange": {"protectedRangeId": pr["protectedRangeId"]}})
+    for sh in meta.get("sheets", []):
+        p = sh["properties"]
+        gid, title = p["sheetId"], p["title"]
+        unprot = [{"sheetId": gid, "startRowIndex": r0, "endRowIndex": r1,
+                   "startColumnIndex": c0, "endColumnIndex": c1}
+                  for r0, r1, c0, c1 in edit_ranges.get(title, [])]
+        expected[gid] = len(unprot)
+        pr = {"range": {"sheetId": gid}, "description": PROTECTION_DESCRIPTION,
+              "warningOnly": False,
+              "editors": {"users": editors, "domainUsersCanEdit": False}}
+        if unprot:
+            pr["unprotectedRanges"] = unprot
+        reqs.append({"addProtectedRange": {"protectedRange": pr}})
+    if not expected:
+        raise RuntimeError("spreadsheet has no tabs")
+    sheets.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id,
+                                      body={"requests": reqs}).execute()
+    back = sheets.spreadsheets().get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets(properties(sheetId),protectedRanges(description,warningOnly,"
+               "range,unprotectedRanges))").execute()
+    problems = []
+    for sh in back.get("sheets", []):
+        gid = sh["properties"]["sheetId"]
+        ours = [pr for pr in sh.get("protectedRanges", []) or []
+                if pr.get("description") == PROTECTION_DESCRIPTION]
+        if len(ours) != 1 or ours[0].get("warningOnly") \
+                or len(ours[0].get("unprotectedRanges", []) or []) != expected.get(gid, 0) \
+                or set(ours[0].get("range", {}).keys()) - {"sheetId"}:
+            problems.append(str(gid))
+    if problems or len(back.get("sheets", [])) != len(expected):
+        raise RuntimeError(f"protection read-back mismatch on tab(s) {', '.join(problems) or '?'}")
+    return len(expected)
+
+
+def protect_and_share(spreadsheet_id, xlsx_bytes, drive=None, sheets=None) -> bool:
+    """Lock the uploaded sheet, THEN give the Coordinator edit access.
+      1. Every tab = one protected range (whole sheet) editable only by
+         SHEET_FULL_CONTROL + the pipeline service account, with the
+         Coordinator-editable follow-up cells left unprotected. A protected sheet
+         also blocks inserting / deleting rows or columns, renaming or deleting the
+         tab and changing the protection for everyone else.
+      2. Editors may not re-share or change permissions (writersCanShare = off).
+      3. COORDINATOR_EDITOR gets "writer" on this file (no notification e-mail).
+    xlsx_bytes is the workbook that was just uploaded (see followup_input_ranges).
+    The Coordinator is granted edit access ONLY after the protection is read back
+    and verified, so a failure never leaves an unprotected editable sheet (the run
+    itself continues; the Coordinator keeps folder view access). Returns True when
+    protected and shared."""
+    if not spreadsheet_id:
+        return False
+    try:
+        # the editable cells come from the workbook just uploaded (same tabs/rows)
+        edit_ranges = followup_input_ranges(xlsx_bytes)
+        if sheets is None:
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build as gbuild
+            creds = service_account.Credentials.from_service_account_file(
+                AR.SERVICE_ACCOUNT_FILE, scopes=["https://www.googleapis.com/auth/drive"]
+            ).with_subject(IMPERSONATE_USER)
+            sheets = gbuild("sheets", "v4", credentials=creds, cache_discovery=False)
+        drive = drive or _drive_client()
+        editors = list(dict.fromkeys(e for e in SHEET_FULL_CONTROL + [_service_account_email()] if e))
+        n_tabs = _retry(lambda: _apply_protection(sheets, spreadsheet_id, edit_ranges, editors),
+                        "Sheets: protect Coordinator sheet")
+        _retry(drive.files().update(fileId=spreadsheet_id, body={"writersCanShare": False},
+                                    supportsAllDrives=True).execute,
+               "Drive: editors may not re-share")
+        if COORDINATOR_EDITOR:
+            _retry(drive.permissions().create(
+                fileId=spreadsheet_id, sendNotificationEmail=False, supportsAllDrives=True,
+                body={"type": "user", "role": "writer", "emailAddress": COORDINATOR_EDITOR}).execute,
+                "Drive: Coordinator edit access")
+        n_rows = sum((r1 - r0) for rs in edit_ranges.values() for r0, r1, _c0, _c1 in rs)
+        print(f"[protect] ✓ sheet protected ({n_tabs} tab(s); {n_rows} follow-up row(s) editable "
+              f"in {', '.join(COORDINATOR_EDITABLE)}) and shared for editing with {COORDINATOR_EDITOR}")
+        return True
+    except Exception as exc:                                   # noqa: BLE001
+        bar = "!" * 70
+        log.error("%s\nSHEET NOT PROTECTED / NOT SHARED FOR EDITING (%s): %s\nThe report is "
+                  "uploaded; %s keeps its folder (view) access only until this is fixed.\n%s",
+                  bar, spreadsheet_id, exc, COORDINATOR_EDITOR, bar)
+        print(f"[protect] FAILED — {exc}")
+        return False
 
 
 def upload_datewise(report_date: date, filename: str, buf: io.BytesIO) -> str:
