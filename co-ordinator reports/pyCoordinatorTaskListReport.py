@@ -154,10 +154,13 @@ STAR_EMAIL_IN_GMAIL = True
 #  REPORT GENERATION CONTROL  (flag-based; mirrors pyLeadFollowUpAnalysisReport.py)
 # =============================================================================
 #  GENERATE_AUTO = True  → scheduler-friendly automatic selection by run date:
-#      • Daily   — every run, for the current day.
+#      • Daily   — every run, for DAILY_DATE when it is set, otherwise the
+#                  current day (IST).
 #      • Weekly  — every Monday, for the previous completed week (Mon → Sun).
 #      • Monthly — on the last calendar day of the month, for that whole month.
-#    (The manual GENERATE_* / date flags below are IGNORED while AUTO is True.)
+#    (The other GENERATE_* / date flags below are IGNORED while AUTO is True.)
+#    Keep DAILY_DATE = None for the scheduled runs, or every scheduled run
+#    will rebuild that same pinned day.
 #
 #  GENERATE_AUTO = False → use the GENERATE_DAILY / WEEKLY / MONTHLY / MANUAL
 #    flags independently; several can be True and are all produced in one run.
@@ -170,7 +173,7 @@ GENERATE_WEEKLY  = True
 GENERATE_MONTHLY = True
 GENERATE_MANUAL  = False          # Manual = a custom start/end date range
 
-DAILY_DATE            = None      # "YYYY-MM-DD"  (None = today)
+DAILY_DATE            = None      # "2026-10-02"      # "YYYY-MM-DD"  (None = today)
 WEEKLY_REFERENCE_DATE = None      # any date within the wanted week (None = this week)
 MONTHLY_MONTH         = None      # 1-12          (None = current month)
 MONTHLY_YEAR          = None      # e.g. 2026     (None = current year)
@@ -3869,6 +3872,29 @@ def _month_label(y, m):
     return date(y, m, 1).strftime("%B %Y")
 
 
+def _daily_report_date(today):
+    """The Daily report's date: DAILY_DATE ("YYYY-MM-DD") when set — in AUTO and
+    in flag mode alike — otherwise `today` (IST run date). A malformed value
+    stops the run with a clear message instead of silently using today."""
+    if DAILY_DATE in (None, ""):
+        return today
+    if isinstance(DAILY_DATE, datetime):
+        d = DAILY_DATE.date()
+    elif isinstance(DAILY_DATE, date):
+        d = DAILY_DATE
+    else:
+        try:
+            d = datetime.strptime(str(DAILY_DATE).strip(), "%Y-%m-%d").date()
+        except ValueError:
+            raise ValueError(f"DAILY_DATE = {DAILY_DATE!r} is not a valid date "
+                             f"— use \"YYYY-MM-DD\" or None (today).") from None
+    if d != today:
+        log.warning("DAILY_DATE is set: the Daily report is generated for %s, not for "
+                    "today (%s). Set DAILY_DATE = None for the scheduled runs.",
+                    d.strftime("%d-%b-%Y"), today.strftime("%d-%b-%Y"))
+    return d
+
+
 def _plan_jobs(today):
     """Decide which report(s) to generate and for what period, from the control
     flags. Returns a list of job dicts:
@@ -3879,10 +3905,12 @@ def _plan_jobs(today):
     (tabs, calculations, formatting, upload) is unchanged."""
     jobs = []
 
+    daily_date = _daily_report_date(today)
+
     # ── AUTO: pick reports from the run date (manual flags ignored) ───────────
     if GENERATE_AUTO:
-        # Daily — every run, for the current day.
-        jobs.append({"kind": "daily", "date": today})
+        # Daily — every run, for DAILY_DATE when set, otherwise the current day.
+        jobs.append({"kind": "daily", "date": daily_date})
         # Weekly — every Monday, for the previous completed week (Mon → Sun).
         if today.weekday() == 0:                       # Monday
             mon = today - timedelta(days=7)
@@ -3901,8 +3929,7 @@ def _plan_jobs(today):
 
     # ── MANUAL flag mode: each flag independent; several may run in one pass ──
     if GENERATE_DAILY:
-        d = datetime.strptime(DAILY_DATE, "%Y-%m-%d").date() if DAILY_DATE else today
-        jobs.append({"kind": "daily", "date": d})
+        jobs.append({"kind": "daily", "date": daily_date})
     if GENERATE_WEEKLY:
         ref = (datetime.strptime(WEEKLY_REFERENCE_DATE, "%Y-%m-%d").date()
                if WEEKLY_REFERENCE_DATE else today)
@@ -3990,7 +4017,8 @@ def email_results(results):
         else:                                                      # Daily task list
             kind = "Daily"
             label = datetime.strptime(r["report_date"], "%Y-%m-%d").strftime("%d-%b-%Y")
-            body = CE.batch_coordinator_html(kind, label, r.get("link"), r.get("task_counts"))
+            body = CE.batch_coordinator_html(kind, label, r.get("link"), r.get("task_counts"),
+                                             today_label=AR._ist_today().strftime("%d-%b-%Y"))
         ok = CE.send(f"{kind} Batch Coordinator Report - {label}", body,
                      EMAIL_RECIPIENTS, sender=EMAIL_SENDER, star=STAR_EMAIL_IN_GMAIL) and ok
     return ok

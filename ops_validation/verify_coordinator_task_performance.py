@@ -18,6 +18,7 @@ report versions, and checks the performance ledger against hand-computed answers
 No Google access needed.
 """
 import os
+import re
 import sys
 import types
 from datetime import date, datetime
@@ -257,8 +258,9 @@ for start, end, daily, lab in ((D2, D2, True, "Daily"), (D1, D2, False, "Period"
           ["Generated vs Completed vs Open — hour by hour"] + ([] if daily else
           ["Each report day's tasks by outcome", "Completion % and Timely % by report day"]))
     hrow = secs[0][0] + 1
-    last = max(r for r in range(hrow + 1, ws.max_row + 1)
-               if ws.cell(row=r, column=1).value and r < (secs[1][0] if len(secs) > 1 else 10 ** 6))
+    last = max(r for r in range(hrow + 1, ws.max_row + 1)      # last hour row of the table
+               if re.match(r"^\d{1,2} (AM|PM)$", str(ws.cell(row=r, column=1).value or ""))
+               and r < (secs[1][0] if len(secs) > 1 else 10 ** 6))
     check(f"{lab}: hour chart anchored at column A just under the table (one spacer row)",
           anchor_rc(charts[0])[::-1], (1, last + 2))
     blank = run_ = 0

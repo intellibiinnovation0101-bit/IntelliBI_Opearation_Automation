@@ -320,6 +320,7 @@ BC._generate_period = lambda service, report_type, start, end, plabel, *a: {
     "link": "https://docs.google.com/spreadsheets/d/w", "report_type": report_type,
     "period": plabel, "start": start.isoformat(), "end": end.isoformat()}
 BC.GENERATE_AUTO = True
+BC.DAILY_DATE = None               # Daily = the (patched) run date
 BC.SEND_EMAIL = True
 SENT.clear()
 BOX.reset(visible_after=2)

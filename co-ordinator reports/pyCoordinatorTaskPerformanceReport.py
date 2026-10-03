@@ -194,7 +194,7 @@ GENERATE_WEEKLY  = False
 GENERATE_MONTHLY = False
 GENERATE_MANUAL  = False
 
-DAILY_DATE            = None  # "YYYY-MM-DD"
+DAILY_DATE            = "2026-10-02" # "YYYY-MM-DD" None
 WEEKLY_REFERENCE_DATE = None  # any date within required week
 MONTHLY_MONTH         = None  # 1-12
 MONTHLY_YEAR          = None
@@ -918,6 +918,54 @@ def hourly_progress(tasks: list, days, now: datetime):
     return rows
 
 
+def within_day_gaps(tasks: list, days):
+    """What of the report day(s)' task activity is NOT on the within-day hour
+    axis, and why — so the Progress Trend explains a short or empty timeline
+    instead of showing a blank table:
+      generated_after   tasks first listed only AFTER their report day ended
+                        (the day's task list was produced later, e.g. a re-run
+                        for a past date) — there was nothing to act on during
+                        the day, so they cannot be placed on its timeline
+      completed_after   completions stamped after the report day (late)
+      completed_no_time completed without a valid Follow-Up DateTime"""
+    days = {days} if isinstance(days, date) else set(days)
+    ts = [t for t in tasks if t["day"] in days]
+    after = [t for t in ts if t["first_seen"] and t["first_seen"].date() > t["day"]]
+    return {"tasks": len(ts),
+            "generated_after": len(after),
+            "first_generated_after": min((t["first_seen"] for t in after), default=None),
+            "completed_after": sum(1 for t in ts
+                                   if t["completed_at"] and t["completed_at"].date() > t["day"]),
+            "completed_no_time": sum(1 for t in ts if t["completed"] and not t["completed_at"])}
+
+
+def _gap_text(g, is_daily, when, empty):
+    """Plain-language explanation of within_day_gaps() for the Progress Trend."""
+    first = g["first_generated_after"]
+    first_txt = f" (first listed {first.strftime('%d-%b-%Y %I:%M %p')} IST)" if first else ""
+    parts = []
+    if empty:
+        if is_daily:
+            parts.append(f"No within-day progress can be shown for {when}: the task list for this day "
+                         f"was generated only after the day had ended{first_txt}, so none of its "
+                         f"{g['tasks']} task(s) was available to the Coordinator during {when}.")
+        else:
+            parts.append(f"No within-day progress can be shown: all {g['tasks']} task(s) of this period "
+                         f"were generated only after their report day had ended{first_txt}.")
+        parts.append("The tasks are still counted in the Dashboard and the Task Register "
+                     "(due at the end of the report day, so they show as Missed or Completed late).")
+    elif g["generated_after"]:
+        parts.append(f"{g['generated_after']} task(s) were generated only after their report day "
+                     f"had ended{first_txt} and are not part of the hour-by-hour figures above.")
+    if g["completed_after"] and not empty:
+        parts.append(f"{g['completed_after']} completion(s) were recorded after the report day "
+                     f"(counted as late, not shown on the day's hours).")
+    if g["completed_no_time"]:
+        parts.append(f"{g['completed_no_time']} completion(s) have no valid Follow-Up DateTime "
+                     f"(counted as completed, not placed on the hours).")
+    return " ".join(parts)
+
+
 def daywise_progress(tasks: list, days: list):
     rows = []
     for d in days:
@@ -1216,6 +1264,17 @@ def _chart_below(ws, row, height_cm):
     return f"A{row + 1}", row + 1 + n
 
 
+def _trend_note(ws, row, ncols, text, level="muted"):
+    """A full-width, wrapped explanatory line (Progress Trend)."""
+    bg, fg = BC.ds_level_colors(level)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=ncols)
+    BC.ds_cell(ws, row, 1, text, bg=bg, fg=fg, wrap=True, italic=True)
+    for cc in range(2, ncols + 1):
+        ws.cell(row=row, column=cc).border = BC.ds_border()
+    ws.row_dimensions[row].height = 15 * max(2, -(-len(text) // 150))
+    return row + 1
+
+
 def build_trend(ws, ledger, tasks, period_label, days, is_daily, now, period_text=None):
     """Progress Trend tab.
     1. WITHIN-DAY PROGRESS — <report day / period>: Generated vs Completed vs
@@ -1240,9 +1299,12 @@ def build_trend(ws, ledger, tasks, period_label, days, is_daily, now, period_tex
     hp = hourly_progress(tasks, days, now) if days else []
     row = BC.ds_section(ws, row, NC, f"WITHIN-DAY PROGRESS — {when}" + (
         "" if is_daily else "  (all report days combined, by hour of day)"), level=1)
-    if not hp:
+    gaps = within_day_gaps(tasks, days) if days else {"tasks": 0}
+    if not hp and not gaps["tasks"]:
         row = BC.ds_empty(ws, row, NC, "No trackable tasks on this report day." if is_daily else
                           "No trackable tasks in this period.", level="muted") + 1
+    elif not hp:                               # tasks exist, but none on the day's timeline
+        row = _trend_note(ws, row, NC, _gap_text(gaps, is_daily, when, empty=True), level="medium") + 1
     else:
         h0 = row
         row = _hdr(ws, row, ["Hour (IST)", "Tasks Generated (cumulative)", "Completed in Hour",
@@ -1266,6 +1328,9 @@ def build_trend(ws, ledger, tasks, period_label, days, is_daily, now, period_tex
                      (Reference(ws, min_col=5, min_row=h0, max_row=f0 + len(hp) - 1), CHART_COLORS["remaining"])],
                     anchor, y_title="Tasks", height=height,
                     width=round(_grid_width_cm(TREND_WIDTHS) - 0.4, 1))
+        _gt = _gap_text(gaps, is_daily, when, empty=False)
+        if _gt:
+            row = _trend_note(ws, row, NC, _gt) + 1
 
     # ── 2. periods: day-wise outcome + task-group completion by day ────────
     if not is_daily:

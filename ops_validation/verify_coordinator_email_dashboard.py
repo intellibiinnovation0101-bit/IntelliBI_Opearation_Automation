@@ -418,6 +418,7 @@ def _fake_period(service, report_type, start, end, plabel, *a):
 BC._generate_daily = _fake_daily
 BC._generate_period = _fake_period
 BC.GENERATE_AUTO = True
+BC.DAILY_DATE = None               # Daily = the (patched) run date
 BC.SEND_EMAIL = True
 BC.STAR_EMAIL_IN_GMAIL = False     # starring has its own test: verify_gmail_star.py
 SENT.clear()

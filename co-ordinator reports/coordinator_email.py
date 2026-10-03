@@ -343,19 +343,23 @@ def performance_html(kind, label, s, groups, url, median_label, on_track=75.0, w
                 f"{kind} Coordinator Task Performance Report", closing)
 
 
-def batch_coordinator_html(kind, label, url, task_counts=None, note=None):
+def batch_coordinator_html(kind, label, url, task_counts=None, note=None, today_label=None):
     """Batch Coordinator e-mail. task_counts = {task tab: rows needing action}
-    for the Daily task list (None for the Weekly / Monthly / Manual roll-ups)."""
+    for the Daily task list (None for the Weekly / Monthly / Manual roll-ups).
+    today_label = the run day ("DD-Mon-YYYY"); a Daily report for another day
+    (DAILY_DATE pinned) is then not worded as "Today's"."""
+    is_today = today_label is None or today_label == label
     body = ""
     if task_counts:
         total = sum(task_counts.values())
         items = [(_E(k), v, RED if v else GREEN) for k, v in task_counts.items()]
-        body += (section("Today's Task List") + card_block([("Total Tasks", total, NAVY)], 1)
+        body += (section("Today's Task List" if is_today else f"Task List — {label}") + card_block([("Total Tasks", total, NAVY)], 1)
                  + card_block(items, 3))
     if note:
         body += f"<p style='margin:12px 0 0;color:#5b6b86;font-size:12.5px'>{_E(note)}</p>"
     if kind == "Daily":
-        intro = (f"Today's Coordinator task list for <b>{_E(label)}</b> is ready. "
+        intro = (("Today's" if is_today else "The") +
+                 f" Coordinator task list for <b>{_E(label)}</b> is ready. "
                  "Please work through each tab and record <b>Action Taken</b>, "
                  "<b>Follow-Up Comment</b> and <b>Follow-Up Done?</b> directly in the Google Sheet "
                  "— the evening Task Performance report reads them from there.")
