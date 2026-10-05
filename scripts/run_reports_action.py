@@ -11,6 +11,9 @@ scripts still run.
     pyAttendaceFeedbackReport        <- SessionAttendance, StudentPayment
     pyAssignmentSubmissionsReport    <- AssignmentSubmissions
     pyAssignmentSubmissionEmailReminder <- AssignmentSubmissions
+    pyAssignmentSubmissionPerformanceReport <- AssignmentSubmissions
+       Assignment Submission Performance + Non-Submission reports (Daily =
+       system date − 1; Weekly on Monday; Monthly on the 1st).
     pyBatchPlanner                   <- (independent — reads local data_inputs/)
     pyStudentProfileReport           <- SessionAttendance, AssignmentSubmissions, StudentPayment
     pyAdmissionFormalitiesReport     <- StudentPayment, ZohoSignatureStatus
@@ -44,6 +47,8 @@ JOBS = [
     ("pyAssignmentSubmissionsReport", "Assignment Submissions Report",
         ["pyAssignmentSubmissions"]),
     ("pyAssignmentSubmissionEmailReminder", "Assignment Submission Email Reminder",
+        ["pyAssignmentSubmissions"]),
+    ("pyAssignmentSubmissionPerformanceReport", "Assignment Submission Performance Report",
         ["pyAssignmentSubmissions"]),
     ("pyBatchPlanner", "Batch Planner", []),
     ("pyStudentProfileReport", "Student Profile Report",

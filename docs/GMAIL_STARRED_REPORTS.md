@@ -6,6 +6,9 @@ These report e-mails are starred automatically once they are sent:
 |---|---|---|
 | Operations | `co-ordinator reports/pyCoordinatorTaskPerformanceReport.py` | `<Type> Coordinator Task Performance Report - <period>` |
 | Operations | `co-ordinator reports/pyCoordinatorTaskListReport.py` | `<Type> Batch Coordinator Report - <period>` |
+| Operations | `ops_reports_action/pyAssignmentSubmissionPerformanceReport.py` | `<Type> Assignment Submission Report - <period>` (one e-mail per Daily / Weekly / Monthly / Manual period, linking both the Performance and the Non-Submission report) |
+| Operations | `ops_reports_action/pyAttendaceFeedbackReport.py` | `IntelliBI <Type> Attendance & Feedback Report — <period>` |
+| Operations | `ops_reports_action/pyAssignmentSubmissionEmailReminder.py` | the staff summary `[IntelliBI] Reminder Run — <date> • n/m sent`. The individual student reminder e-mails are not starred, because info@ does not receive them. |
 | Sales | `sales_reports/pyConsolidatedLeadPerformanceReport.py` | `<Type> Lead Report - <period>` |
 | Sales | `sales_reports/pyLeadFollowUpAnalysisReport.py` | `<Type> Lead Follow-Up Analysis Report - <period>` |
 
@@ -22,12 +25,14 @@ A star belongs to **one mailbox**. The sending account can star its own copy. No
 
 1. In Gmail, open the search-options arrow in the search bar.
 2. **From:** `info@intellibiinnovationstechnologies.in`
-3. **Subject:** `"Coordinator Task Performance Report" OR "Batch Coordinator Report" OR "Lead Report" OR "Lead Follow-Up Analysis Report"`
+3. **Subject:** `"Coordinator Task Performance Report" OR "Batch Coordinator Report" OR "Assignment Submission Report" OR "Attendance & Feedback Report" OR "Reminder Run" OR "Lead Report" OR "Lead Follow-Up Analysis Report"`
 4. Click **Create filter**, tick **Star it** (optionally also **Never send it to Spam**), and click **Create filter**.
 
 ## One-time requirement
 IMAP must be allowed for the sending account. For a personal Gmail account, IMAP is always on. For a Google Workspace account, the administrator can switch it off: Admin console ▸ Apps ▸ Google Workspace ▸ Gmail ▸ End User Access ▸ POP and IMAP access. The existing app password covers IMAP; no new credential is needed.
 
 ## Checking it
+- `python ops_validation\verify_assignment_submission_reports.py` also checks starring for the Assignment Submission e-mails.
+- `python ops_validation\verify_gmail_star_attendance_reminder.py` checks the Attendance & Feedback report e-mail and the assignment reminder staff summary.
 - `python ops_validation\verify_gmail_star.py` (Operations) and `python sales_validation\verify_gmail_star.py` (Sales) test everything offline against an in-memory Gmail.
 - Live, read-only: `python common\gmail_star.py --check` lists the last 2 days of report e-mails in the sending mailbox with ★ / ☆. Add `--days 7` for a longer period.

@@ -129,6 +129,9 @@ MANUAL_END_DATE       = None         # "YYYY-MM-DD" — required when GENERATE_M
 
 # Output behavior (unchanged)
 send_email  = True                   # True → build AND e-mail; False → build only
+# Star (★) each report e-mail in the sending Gmail account (info@) once it is
+# sent (common/gmail_star.py; best-effort — never affects sending or the run).
+STAR_EMAIL_IN_GMAIL = True
 upload_to_local_directory = False    # True → also save under LOCAL_UPLOAD_DIR
 
 # Base local computer directory used only when upload_to_local_directory = True.
@@ -2275,6 +2278,16 @@ def _build_attendance_table(att_rows: list) -> str:
         f"{head}{''.join(body_rows)}{total_row}</table>")
 
 
+def _gmail_star():
+    """common/gmail_star.py, or None (with a warning) if it cannot be loaded."""
+    try:
+        import gmail_star
+        return gmail_star
+    except Exception as exc:                                   # noqa: BLE001
+        print(f"[Email] ★ starring unavailable — common/gmail_star.py: {exc}")
+        return None
+
+
 def send_report(report_type: str, label: str, filename: str, file_bytes: bytes,
                 n_sessions: int, n_students: int,
                 n_absent: int, combined_att_pct: float,
@@ -2321,6 +2334,9 @@ def send_report(report_type: str, label: str, filename: str, file_bytes: bytes,
     msg["Subject"]  = subject
     if REPORT_CC:
         msg["Cc"]   = ", ".join(REPORT_CC)
+    _gs = _gmail_star() if STAR_EMAIL_IN_GMAIL else None
+    if _gs is not None:                          # lets the sent copy be found & starred
+        msg["Message-ID"] = _gs.new_message_id(GMAIL_SENDER)
     msg.attach(MIMEText(body, "html"))
 
     part = MIMEBase("application", "octet-stream")
@@ -2335,6 +2351,8 @@ def send_report(report_type: str, label: str, filename: str, file_bytes: bytes,
         server.sendmail(GMAIL_SENDER, recipients, msg.as_string())
 
     print(f"[Email] ✓ Report sent to {', '.join(to_list)}")
+    if _gs is not None:                          # star it in Gmail — never changes the result
+        _gs.star_sent_message(GMAIL_SENDER, GMAIL_APP_PASS, msg["Message-ID"], subject)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -48,6 +48,7 @@ Read Submissions → classify reminder levels → consolidate per student → se
 - Move reminder-day thresholds + staff recipients into `config.yaml`.
 
 ## Change history
+- 2026-10-05 — Gmail Star (★): the staff summary e-mail (`[IntelliBI] Reminder Run — …`), which is the run's report e-mail, is starred in the sending info@ mailbox after a successful send, through the shared `common/gmail_star.py` (`STAR_EMAIL_IN_GMAIL = True`). Student reminder e-mails are not starred, because info@ is not one of their recipients. A starring problem prints one warning and never changes any e-mail or the run. Nothing else changed.
 - 2026-08-24 — Moved into Operations project; service-account + email import made project-root-relative. No business-logic / reminder-behaviour change.
 
 ## Email Summary Metrics

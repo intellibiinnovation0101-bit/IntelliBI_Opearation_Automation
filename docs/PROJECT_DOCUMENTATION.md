@@ -39,6 +39,7 @@ Layer 2  ops_reports_action       reports/actions in PARALLEL where safe;
 | `pyAttendaceFeedbackReport.py` | SessionAttendance, StudentPayment |
 | `pyAssignmentSubmissionsReport.py` | AssignmentSubmissions |
 | `pyAssignmentSubmissionEmailReminder.py` | AssignmentSubmissions |
+| `pyAssignmentSubmissionPerformanceReport.py` | AssignmentSubmissions — Assignment Submission Performance + Non-Submission reports |
 | `pyBatchPlanner.py` | *(independent — reads local `data_inputs/`)* |
 | `pyStudentProfileReport.py` | SessionAttendance, AssignmentSubmissions, StudentPayment |
 | `pyAdmissionFormalitiesReport.py` | StudentPayment, ZohoSignatureStatus |

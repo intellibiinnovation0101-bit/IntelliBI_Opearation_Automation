@@ -87,6 +87,12 @@ CC_RECIPIENTS  = []
 # dramatically reduces Gmail's per-recipient send count.
 STAFF_SUMMARY_RECIPIENTS = ["intellibihropsb2ch@gmail.com","info@intellibiinnovationstechnologies.in"]
 
+# Star (★) the staff summary e-mail (the report e-mail of this run) in the
+# sending Gmail account (info@) once it is sent (common/gmail_star.py;
+# best-effort — never affects sending or the run). Individual student reminder
+# e-mails are not starred: info@ is not one of their recipients.
+STAR_EMAIL_IN_GMAIL = True
+
 # ── Send throttling (to stay safely under Gmail anti-spam heuristics) ────────
 INTER_EMAIL_DELAY_SEC = 3     # wait N seconds between consecutive student emails
 EMAIL_BATCH_SIZE      = 20    # after this many emails, pause longer
@@ -919,6 +925,16 @@ def _build_staff_summary_html(consolidated: list,
     return html
 
 
+def _gmail_star():
+    """common/gmail_star.py, or None (with a warning) if it cannot be loaded."""
+    try:
+        import gmail_star
+        return gmail_star
+    except Exception as exc:                                   # noqa: BLE001
+        print(f"[Email] ★ starring unavailable — common/gmail_star.py: {exc}")
+        return None
+
+
 def send_staff_summary_email(consolidated: list,
                              sent_ok: list,
                              sent_fail: list,
@@ -983,6 +999,9 @@ def send_staff_summary_email(consolidated: list,
         msg["From"]    = GMAIL_SENDER
         msg["To"]      = ", ".join(STAFF_SUMMARY_RECIPIENTS)
         msg["Subject"] = subject
+        _gs = _gmail_star() if STAR_EMAIL_IN_GMAIL else None
+        if _gs is not None:                      # lets the sent copy be found & starred
+            msg["Message-ID"] = _gs.new_message_id(GMAIL_SENDER)
         msg.attach(MIMEText(html, "html"))
 
         # Attach PDFs (reminder PDFs + extra status PDF, if any)
@@ -1001,6 +1020,8 @@ def send_staff_summary_email(consolidated: list,
         print(f"[Summary] ✓ Staff summary email sent to "
               f"{len(STAFF_SUMMARY_RECIPIENTS)} recipient(s): "
               f"{', '.join(STAFF_SUMMARY_RECIPIENTS)}")
+        if _gs is not None:                      # star it in Gmail — never changes the result
+            _gs.star_sent_message(GMAIL_SENDER, GMAIL_APP_PASS, msg["Message-ID"], subject)
         return True
     except Exception as e:
         print(f"[Summary] ⚠ Failed to send staff summary: {e}")
@@ -2457,4 +2478,4 @@ def _main_impl():
 
 
 if __name__ == "__main__":
-    main()
+    main()

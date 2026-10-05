@@ -6,7 +6,11 @@
   and the Operations projects):
       Operations  co-ordinator reports/pyCoordinatorTaskPerformanceReport.py
                   co-ordinator reports/pyCoordinatorTaskListReport.py
-                  (both through co-ordinator reports/coordinator_email.send)
+                  ops_reports_action/pyAssignmentSubmissionPerformanceReport.py
+                  (all three through co-ordinator reports/coordinator_email.send)
+                  ops_reports_action/pyAttendaceFeedbackReport.py      (send_report)
+                  ops_reports_action/pyAssignmentSubmissionEmailReminder.py
+                  (the staff summary e-mail, send_staff_summary_email)
       Sales       sales_reports/pyConsolidatedLeadPerformanceReport.py
                   sales_reports/pyLeadFollowUpAnalysisReport.py
 
@@ -53,8 +57,10 @@ MAX_SESSIONS = 2                        # reconnect once on a dropped IMAP sessi
 # same run skip starring at once instead of waiting for the same failure again
 _GIVE_UP: dict = {}
 
-# Subjects of the four report e-mails (used only by --check)
+# Subjects of the starred report e-mails (used only by --check)
 REPORT_SUBJECTS = ("Coordinator Task Performance Report", "Batch Coordinator Report",
+                   "Assignment Submission Report", "Attendance & Feedback Report",
+                   "Reminder Run",
                    "Lead Report", "Lead Follow-Up Analysis Report")
 
 
