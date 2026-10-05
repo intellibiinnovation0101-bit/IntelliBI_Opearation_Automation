@@ -67,6 +67,10 @@ def flags(auto=False, daily=False, weekly=False, monthly=False, manual=False, da
 
 
 MON, THU1, WED = date(2026, 10, 5), date(2026, 10, 1), date(2026, 10, 7)
+# the delivery settings are pinned here, so local edits of the script's flags
+# (e.g. SEND_EMAIL = False for a test run) do not change what is verified
+M.UPLOAD_TO_DRIVE = M.SEND_EMAIL = M.OVERWRITE_EXISTING = True
+M.GENERATE_NON_SUBMISSION_PDF = M.PDF_FOR_FULLY_SUBMITTED = True
 
 # =============================================================================
 print("\n== 1. Reporting periods ==")
@@ -369,6 +373,140 @@ check("empty period: clear message, no blank tables", "nothing to evaluate" in t
       "nothing to follow up" in txt, True)
 
 # =============================================================================
+# =============================================================================
+print("\n== 4d. Assignment-wise Non-Submission PDFs (one per assignment, same dataset) ==")
+import pdfplumber                                           # noqa: E402
+import contextlib                                           # noqa: E402
+
+
+def pdf_text(b):
+    with pdfplumber.open(io.BytesIO(b)) as pdf:
+        pages = [re.sub(r"[ \t]+", " ", p.extract_text() or "") for p in pdf.pages]
+        fills = {tuple(round(c * 255) for c in r["non_stroking_color"])
+                 for p in pdf.pages for r in p.rects
+                 if isinstance(r.get("non_stroking_color"), (tuple, list))
+                 and len(r["non_stroking_color"]) == 3}
+    return pages, fills
+
+
+def _rgb(h):
+    return tuple(int(h[i:i + 2], 16) for i in (1, 3, 5))
+
+
+BANNER = re.compile(r"Class: (.+?) \| Duration: (.+?) \| Assignment: (.+?) \| Start: (\S+) \| Deadline: (\S+)")
+PDFS = M.build_non_submission_pdfs(wk, ds)
+check("5 eligible assignments → 5 separate PDFs, in the Performance Report's order",
+      [(p["assessment_id"], p["class_id"]) for p in PDFS],
+      [(a["assessment_id"], a["class_id"]) for a in ds["assignments"]])
+check("each is a real PDF", all(p["pdf_bytes"][:5] == b"%PDF-" for p in PDFS), True)
+check("not submitted across the PDFs = the Performance Report's Not Submitted (4)",
+      (sum(p["pending"] for p in PDFS), s["not_submitted"]), (4, 4))
+check("assignment-specific file names (reminder style); two batches of 'Shared Quiz' told apart "
+      "by the class duration",
+      [p["filename"] for p in PDFS],
+      ["Assignment_Excel_Shared_Quiz_01-Sep-2026_To_Current_Date_Weekly_28-Sep-2026_to_04-Oct-2026.pdf",
+       "Assignment_Excel_Shared_Quiz_15-Sep-2026_To_Current_Date_Weekly_28-Sep-2026_to_04-Oct-2026.pdf",
+       "Assignment_Power_BI_PBI_Visuals_Weekly_28-Sep-2026_to_04-Oct-2026.pdf",
+       "Assignment_SQL_SQL_Joins_Weekly_28-Sep-2026_to_04-Oct-2026.pdf",
+       "Assignment_SQL_SQL_Basics_Weekly_28-Sep-2026_to_04-Oct-2026.pdf"])
+check("file names unique", len({p["filename"] for p in PDFS}), len(PDFS))
+
+_all_ok, _byname = [], {}
+for p, a in zip(PDFS, ds["assignments"]):
+    pages, fills = pdf_text(p["pdf_bytes"])
+    T = "\n".join(pages)
+    _byname[a["title"] + "|" + a["batch"]] = (T, fills, pages)
+    pend = [r for r in a["rows"] if r["status"] == M.NOT_SUBMITTED]
+    subm = [r for r in a["rows"] if r["status"] != M.NOT_SUBMITTED]
+    others = [r for b in ds["assignments"] if b is not a for r in b["rows"]
+              if r["learner"] not in {x["learner"] for x in a["rows"]}]
+    _all_ok.append((
+        BANNER.findall(T) == [(a["technology"], a["batch"], a["title"], f"{a['start']:%m/%d/%Y}",
+                               f"{a['deadline']:%m/%d/%Y}")],
+        all(r["learner"] in T and r["email"] in T for r in pend),
+        not any(r["learner"] in T for r in subm),
+        not any(r["learner"] in T for r in others),
+        f"{a['not_submitted']} of {a['expected']} learner(s)" in T))
+check("every PDF: one 'Class | Duration | Assignment | Start | Deadline' banner for its own "
+      "assignment, all its non-submitters, no submitted learner, nobody from another assignment, "
+      "its own figures", _all_ok, [(True, True, True, True, True)] * len(PDFS))
+T, fills, pages = _byname["PBI Visuals|" + B2]
+check("e.g. Power BI banner",
+      BANNER.findall(T), [("Power BI", B2, "PBI Visuals", "09/28/2026", "10/03/2026")])
+check("… figures: 2 of 3 not submitted, submitted 1 (33.3%), deadline passed 2 day(s) before",
+      ("2 of 3 learner(s) — 1 active" in T, "Submission % 33.3%" in T,
+       "03-Oct-2026 06:00 PM IST — 2 day(s) before this report" in T, "Maximum Marks 10" in T),
+      (True, True, True, True))
+check("… active learners first (Five = Yes before Four = No)", T.index("Learner Five") < T.index("Learner Four"),
+      True)
+_ord = M.build_dataset(pd.concat([DF, pd.DataFrame([dict(ROWS[5], student_id="s0", student_name="Aaron Unknown",
+                                                         student_email="s0@example.com")])], ignore_index=True),
+                       wk["start"], wk["end"], NOW, ACTIVE)
+_To = "\n".join(pdf_text(next(p["pdf_bytes"] for p in M.build_non_submission_pdfs(wk, _ord)
+                              if p["assignment"] == "PBI Visuals"))[0])
+check("… order: active, then status not found, inactive (struck through) last",
+      sorted(("Learner Five", "Aaron Unknown", "Learner Four"), key=_To.index),
+      ["Learner Five", "Aaron Unknown", "Learner Four"])
+check("… row colours: active red, inactive amber = the Learner Submission Detail amber; "
+      "no bottom notes (colour legend / eligibility text)",
+      ({_rgb(M.PDF_ROW["Yes"]), _rgb(M.PDF_ROW["No"])} <= fills, M.PDF_ROW["No"].lstrip("#").upper(),
+       "Row colours" in T or "Assignments whose deadline fell" in T),
+      (True, M.ROW_INACTIVE.upper(), False))
+
+
+def _struck(pdf_bytes, word):
+    """Is <word> crossed by a horizontal line inside its own text height (a strike)?"""
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        pg = pdf.pages[0]
+        ws = [w for w in pg.extract_words() if w["text"] == word]
+        segs = [(l["x0"], l["x1"], l["top"]) for l in pg.lines] + \
+               [(r["x0"], r["x1"], r["top"]) for r in pg.rects if r["height"] < 1.5]
+        return [any(x0 <= w["x0"] + 1 and x1 >= w["x1"] - 1 and w["top"] < y < w["bottom"]
+                    for x0, x1, y in segs) for w in ws]
+
+
+_pbi = next(p["pdf_bytes"] for p in PDFS if p["assignment"] == "PBI Visuals")
+check("… inactive learner (Learner Four, Active = No) struck through — name, e-mail, phone, status; "
+      "active learner (Learner Five) not",
+      (_struck(_pbi, "Four"), _struck(_pbi, "s4@example.com"), _struck(_pbi, "No"), _struck(_pbi, "Five")),
+      ([True], [True], [True], [False]))
+check("… header with period and generation time, footer with assignment and page",
+      ("Weekly Report | Period: 28-Sep-2026 to 04-Oct-2026 | Generated: 05-Oct-2026 10:30 AM IST" in T,
+       bool(re.search(r"Power BI · PBI Visuals \| Weekly 28-Sep-2026 to 04-Oct-2026 Page 1", T))), (True, True))
+T = _byname["SQL Joins|" + B1][0]
+check("fully submitted assignment: its PDF says so, lists nobody",
+      ("All 3 learner(s) submitted this assignment — nothing to follow up." in T, "Learner One" in T),
+      (True, False))
+M.PDF_FOR_FULLY_SUBMITTED = False
+_only = M.build_non_submission_pdfs(wk, ds)
+M.PDF_FOR_FULLY_SUBMITTED = True
+check("PDF_FOR_FULLY_SUBMITTED = False → only the 3 assignments with non-submitters, still 4 learners",
+      (len(_only), sum(p["pending"] for p in _only)), (3, 4))
+
+# a learner pending on two assignments → 'Pending in Period' 2 on both PDFs
+_DFp = pd.concat([DF, pd.DataFrame([dict(ROWS[8], student_id="s5", student_name="Learner Five",
+                                         student_email="s5@example.com")])], ignore_index=True)
+_dsp = M.build_dataset(_DFp, wk["start"], wk["end"], NOW, ACTIVE)
+_pp = {p["assignment"]: "\n".join(pdf_text(p["pdf_bytes"])[0]) for p in M.build_non_submission_pdfs(wk, _dsp)}
+check("learner pending on 2 assignments: 'Pending in Period' 2 on both of their PDFs",
+      [bool(re.search(r"Learner Five s5@example\.com \+919000000000 Yes 2", _pp[t]))
+       for t in ("PBI Visuals", "SQL Basics")], [True, True])
+check("… still reconciles", sum(p["pending"] for p in M.build_non_submission_pdfs(wk, _dsp)),
+      M.summarise(_dsp)["not_submitted"])
+_de = M.build_dataset(DF, date(2026, 9, 1), date(2026, 9, 2), NOW, ACTIVE)
+check("no eligible assignment → no PDF", M.build_non_submission_pdfs(
+    M.CP.make_job("Manual", date(2026, 9, 1), date(2026, 9, 2)), _de), [])
+
+# names with &, <, > and a long list (page breaks, header repeated)
+_big = pd.DataFrame([dict(ROWS[5], student_id=f"b{i}", student_name=f"Big & <Learner> {i:03d}",
+                          student_email=f"b{i}@example.com") for i in range(120)])
+_dsb = M.build_dataset(_big, wk["start"], wk["end"], NOW, ACTIVE)
+_pb = M.build_non_submission_pdfs(wk, _dsb)
+_pgs = pdf_text(_pb[0]["pdf_bytes"])[0]
+check("special characters escaped, 120 learners over several pages, column header repeated",
+      (len(_pb), _pb[0]["pending"], len(_pgs) > 2, "Big & <Learner> 119" in "\n".join(_pgs),
+       sum("Follow-Up Notes" in p for p in _pgs) >= 2), (1, 120, True, True, True))
+
 print("\n== 5. Google Drive layout ==")
 
 
@@ -419,8 +557,12 @@ class FakeDrive:
             data = media_body.getbytes(0, media_body.size()) if media_body is not None else None
             self.items[fid] = {"id": fid, "name": body["name"], "mimeType": body["mimeType"],
                                "parents": list(body.get("parents", [])), "data": data}
-            return {"id": fid, "webViewLink": f"https://docs.google.com/spreadsheets/d/{fid}/edit"}
+            return {"id": fid, "webViewLink": self.link(fid)}
         return _Req(go)
+
+    def link(self, fid):
+        return (f"https://drive.google.com/file/d/{fid}/view" if self.items[fid]["mimeType"] == M.PDF_MIME
+                else f"https://docs.google.com/spreadsheets/d/{fid}/edit")
 
     refuse_content_update = False
 
@@ -434,7 +576,7 @@ class FakeDrive:
                 it["updates"] = it.get("updates", 0) + 1
             for k, v in (body or {}).items():
                 it[k] = v
-            return {"id": fileId, "webViewLink": f"https://docs.google.com/spreadsheets/d/{fileId}/edit"}
+            return {"id": fileId, "webViewLink": self.link(fileId)}
         return _Req(go)
 
     def path(self, fid):
@@ -443,6 +585,10 @@ class FakeDrive:
             out.append(cur["name"])
             cur = self.items[cur["parents"][0]]
         return cur["name"] + "/" + "/".join(reversed(out))
+
+    def pdfs_under(self):
+        return sorted(self.path(i) for i, it in self.items.items()
+                      if it["mimeType"] == M.PDF_MIME and not it.get("trashed"))
 
     def files_under(self):
         return sorted(self.path(i) for i, it in self.items.items()
@@ -482,7 +628,16 @@ for root, base in ((P, M.PERFORMANCE_BASENAME), (N, M.NON_SUBMISSION_BASENAME)):
 check("each report in its root / type folder / period folder", drive.files_under(), sorted(want))
 check("uploaded as native Google Sheets from an in-memory workbook",
       all(it["mimeType"] == M.SHEET_MIME and it["data"][:2] == b"PK"
-          for it in drive.items.values() if it["mimeType"] != M.FOLDER_MIME), True)
+          for it in drive.items.values() if it["mimeType"] not in (M.FOLDER_MIME, M.PDF_MIME)), True)
+_exp_pdfs = sorted(f"{N}/{M.KIND_FOLDERS[j['kind']]}/{M.CP.period_folder_name(j['kind'], j['start'], j['end'])}"
+                   f"/{p['filename']}"
+                   for j in jobs for p in M.build_non_submission_pdfs(j, M.build_dataset(DF, j["start"], j["end"],
+                                                                                          NOW, ACTIVE)))
+check("one PDF per eligible assignment of every period (1 + 5 + 2 + 0), in "
+      "the Non-Submission period folder beside its Sheet (no subfolder), none under the Performance root, real PDFs",
+      (len(_exp_pdfs), drive.pdfs_under(), all(it["data"][:5] == b"%PDF-" for it in drive.items.values()
+                                                if it["mimeType"] == M.PDF_MIME)),
+      (8, _exp_pdfs, True))
 up_wb = openpyxl.load_workbook(io.BytesIO([it for it in drive.items.values()
                                            if it["name"].endswith("_Weekly_28-Sep-2026_to_04-Oct-2026")
                                            and "Non_Submission" in it["name"]][0]["data"]))
@@ -507,10 +662,13 @@ drive.refuse_content_update = False
 check("in-place overwrite refused → replaced: still one report per name, old copy in the trash",
       (drive.files_under() == _files_before,
        sorted(it["name"] for it in drive.items.values() if it.get("trashed"))),
-      (True, sorted(_daily_ids)))
+      (True, sorted(list(_daily_ids) + [f"Assignment_SQL_SQL_Joins_Daily_04-Oct-2026.pdf"])))
 M.OVERWRITE_EXISTING = False
 M.run_jobs(jobs[:1], DF, NOW, ACTIVE, drive, upload=True, email=False)
 M.OVERWRITE_EXISTING = True
+check("… the PDF too: OVERWRITE_EXISTING = False → '- Version 2.pdf'",
+      [n.rsplit("/", 1)[1] for n in drive.pdfs_under() if "Version" in n],
+      ["Assignment_SQL_SQL_Joins_Daily_04-Oct-2026 - Version 2.pdf"])
 check("OVERWRITE_EXISTING = False keeps the old file and adds '- Version 2'",
       sorted(n.rsplit("/", 1)[1] for n in drive.files_under() if "Version" in n),
       sorted(f"{b}_Daily_04-Oct-2026 - Version 2" for b in (M.PERFORMANCE_BASENAME, M.NON_SUBMISSION_BASENAME)))
@@ -526,6 +684,13 @@ links = re.findall(r"https://docs\.google\.com/spreadsheets/d/(f\d+)/edit", body
 check("links to both reports of that period",
       sorted({drive.items[f]["name"].split("_Report_")[0] for f in links}),
       ["IntelliBI_Assignment_Non_Submission", "IntelliBI_Assignment_Submission_Performance"])
+_pl = re.findall(r"https://drive\.google\.com/drive/folders/(f\d+)'", body)
+check("e-mail links the period's Non-Submission folder and says how many PDFs",
+      ([drive.path(f) for f in _pl], "One printable PDF per assignment (5 files)" in body),
+      ([f"{N}/Weekly Assignment Report/Weekly 28-Sep-2026 to 04-Oct-2026"], True))
+check("no extra folder is created for the PDFs",
+      sorted(it["name"] for it in drive.items.values() if it["mimeType"] == M.FOLDER_MIME
+             and it["name"] == M.LEGACY_PDF_SUBFOLDER), [])
 check("body shows the period's KPIs", all(x in body for x in ("55.6%", "Not Submitted", "By Technology")), True)
 _rows = re.findall(r"<tr style='background:(#[0-9A-F]+);color:#1a2a48'><td[^>]*>([^<]+)</td>"
                    r".*?<td[^>]*color:(#[0-9A-F]+);font-weight:700'>([^<]+)</td></tr>", body)
@@ -583,6 +748,63 @@ check("… nothing expected anywhere: TOTAL shows '—' on white",
       [("#ffffff", ["TOTAL", "0", "0", "0", "0", "—"])])
 
 # =============================================================================
+print("\n== 5b. Assignment-wise PDF delivery ==")
+# overwrite in place; stale PDFs of the period (and the earlier consolidated PDF) to the trash
+_drv = FakeDrive()
+with contextlib.redirect_stdout(io.StringIO()):
+    M.run_jobs([wk], DF, NOW, ACTIVE, _drv, upload=True, email=False)
+_ids = {it["name"]: fid for fid, it in _drv.items.items() if it["mimeType"] == M.PDF_MIME}
+_per_id = M.resolve_period_folder(_drv, M.NON_SUBMISSION_ROOT_FOLDER_ID, wk)
+_drv.n += 1
+_old_sub = f"f{_drv.n}"
+_drv.items[_old_sub] = {"id": _old_sub, "name": M.LEGACY_PDF_SUBFOLDER, "mimeType": M.FOLDER_MIME,
+                        "parents": [_per_id]}
+for _nm, _par in (("Assignment_Old_Gone_Weekly_28-Sep-2026_to_04-Oct-2026.pdf", _per_id),
+                  ("Assignment_Old_Gone_Daily_04-Oct-2026.pdf", _per_id),
+                  (f"{M.LEGACY_PDF_BASENAME}_Weekly_28-Sep-2026_to_04-Oct-2026.pdf", _per_id),
+                  ("Assignment_SQL_SQL_Joins_Not_Submitted_Weekly_28-Sep-2026_to_04-Oct-2026.pdf", _old_sub)):
+    _drv.n += 1
+    _drv.items[f"f{_drv.n}"] = {"id": f"f{_drv.n}", "name": _nm, "mimeType": M.PDF_MIME,
+                                "parents": [_par], "data": b"%PDF-old"}
+with contextlib.redirect_stdout(io.StringIO()) as _o:
+    M.run_jobs([wk], DF2, NOW, ACTIVE, _drv, upload=True, email=False)
+check("re-run: the 5 PDFs overwritten in place (same files, same links)",
+      {it["name"]: fid for fid, it in _drv.items.items() if it["mimeType"] == M.PDF_MIME
+       and not it.get("trashed") and it["name"] in _ids}, _ids)
+check("… a PDF no longer in this period's report, the earlier consolidated PDF and the earlier "
+      "'Assignment-wise PDFs' subfolder → Drive trash; other periods' PDFs and the Sheet untouched",
+      sorted(it["name"] for it in _drv.items.values() if it.get("trashed")),
+      sorted(["Assignment_Old_Gone_Weekly_28-Sep-2026_to_04-Oct-2026.pdf", M.LEGACY_PDF_SUBFOLDER,
+              f"{M.LEGACY_PDF_BASENAME}_Weekly_28-Sep-2026_to_04-Oct-2026.pdf"]))
+check("… logged", _o.getvalue().count("[Drive] Moved to trash"), 3)
+check("… the PDFs sit beside the Non-Submission Sheet",
+      sorted(_drv.path(i).rsplit("/", 1)[0] for i, it in _drv.items.items()
+             if it["mimeType"] in (M.PDF_MIME, M.SHEET_MIME) and not it.get("trashed")
+             and it["parents"] == [_per_id]),
+      [f"{N}/Weekly Assignment Report/Weekly 28-Sep-2026 to 04-Oct-2026"] * 7)
+check("upload lines tagged '[Drive] PDF uploaded:' (Sheets keep '[Drive] Uploaded:')",
+      (_o.getvalue().count("[Drive] PDF uploaded:"), _o.getvalue().count("[Drive] Uploaded:")), (5, 2))
+# a PDF problem never stops the Sheets or the e-mail; flag off = no PDF
+_drv, _real_pdf = FakeDrive(), M.build_assignment_pdf
+M.build_assignment_pdf = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("reportlab missing"))
+_MB = len(MAILS)
+with contextlib.redirect_stdout(io.StringIO()) as _o:
+    _r = M.run_jobs([wk], DF, NOW, ACTIVE, _drv, upload=True, email=True)
+M.build_assignment_pdf = _real_pdf
+check("PDF failure: Sheets uploaded and e-mail sent, the PDF problem reported",
+      (_r[0].get("failed"), len(_drv.files_under()), len(_drv.pdfs_under()), len(MAILS) - _MB,
+       "[PDF FAILED] Non-Submission PDFs — Weekly" in _o.getvalue(), "Non-Submission folder of this period</a>" in MAILS[-1][1]),
+      (None, 2, 0, 1, True, False))
+MAILS.pop()
+M.GENERATE_NON_SUBMISSION_PDF = False
+_drv = FakeDrive()
+with contextlib.redirect_stdout(io.StringIO()):
+    _r = M.run_jobs([wk], DF, NOW, ACTIVE, _drv, upload=True, email=True)
+M.GENERATE_NON_SUBMISSION_PDF = True
+check("GENERATE_NON_SUBMISSION_PDF = False → no PDF, e-mail as before",
+      (len(_drv.pdfs_under()), "One printable PDF per assignment" in MAILS[-1][1], "pdfs" in _r[0]), (0, False, False))
+MAILS.pop()
+
 print("\n== 6. generate() end to end on a Monday 10:30 run ==")
 import utils as _utils                                      # noqa: E402
 _utils.get_sheets_service = lambda *a, **k: None
@@ -594,18 +816,19 @@ M.now_ist = lambda: datetime(2026, 10, 5, 10, 30)
 MAILS.clear()
 flags(auto=True)
 out = io.StringIO()
-import contextlib                                           # noqa: E402
 with contextlib.redirect_stdout(out):
     res, errs = M.generate()
 check("planned Daily 04-Oct (system date − 1) + Weekly 28-Sep..04-Oct",
       [(r["job"]["kind"], r["job"]["label"]) for r in res],
       [("Daily", "04-Oct-2026"), ("Weekly", "28-Sep-2026 to 04-Oct-2026")])
 check("Daily evaluates only assignments due 04-Oct", res[0]["summary"]["assignments"], 1)
-check("4 reports uploaded, 2 e-mails", (len(drive2.files_under()), len(MAILS)), (4, 2))
+check("4 reports + 6 assignment PDFs (Daily 1, Weekly 5) uploaded, 2 e-mails",
+      (len(drive2.files_under()), len(drive2.pdfs_under()), len(MAILS)), (4, 6, 2))
 with contextlib.redirect_stdout(io.StringIO()):
     res2, _ = M.generate()
 check("run again the same day: both periods rebuilt, reports overwritten (still 4 files), e-mailed again",
       ([bool(r.get("failed")) for r in res2], len(drive2.files_under()), len(MAILS)), ([False, False], 4, 4))
+check("… the PDFs overwritten too (still 6)", len(drive2.pdfs_under()), 6)
 flags(manual=True, ms="2026-10-01", me="2026-10-05")
 with contextlib.redirect_stdout(io.StringIO()):
     res3, errs3 = M.generate()
@@ -617,11 +840,55 @@ check("… main() exits 1", rc, 1)
 import exec_summary                                         # noqa: E402
 summ = exec_summary.summarize("pyAssignmentSubmissionPerformanceReport", out.getvalue())
 check("run summary KPIs", [k for k, _v in summ["kpis"]],
-      ["Reports uploaded", "Eligible assignments", "Submitted", "Not submitted", "E-mailed"])
+      ["Reports uploaded", "Assignment PDFs uploaded", "Eligible assignments", "Submitted", "Not submitted",
+       "E-mailed"])
+check("… counts: 4 Sheets, 6 PDFs", dict(summ["kpis"])["Reports uploaded"], 4)
 rra = open(os.path.join(ROOT, "scripts", "run_reports_action.py"), encoding="utf-8").read()
 check("scheduled in the Morning batch after the Assignment Submissions refresh",
       bool(re.search(r'\("pyAssignmentSubmissionPerformanceReport", "[^"]+",\s*\["pyAssignmentSubmissions"\]\)', rra)),
       True)
+
+print("\n== 6b. Operations batch: old Assignment Submissions Report retired ==")
+import ast                                                  # noqa: E402
+_jobs = ast.literal_eval(next(n.value for n in ast.parse(rra).body if isinstance(n, ast.Assign)
+                              and getattr(n.targets[0], "id", "") == "JOBS"))
+_stems = [j[0] for j in _jobs]
+check("Morning batch (run_reports_action.JOBS): Performance Report in, old report out",
+      ("pyAssignmentSubmissionPerformanceReport" in _stems, "pyAssignmentSubmissionsReport" in _stems), (True, False))
+check("… the other jobs and their order unchanged",
+      _stems, ["pyAttendaceFeedbackReport", "pyAssignmentSubmissionEmailReminder",
+               "pyAssignmentSubmissionPerformanceReport", "pyBatchPlanner", "pyStudentProfileReport",
+               "pyAdmissionFormalitiesReport", "pyStudentAdditionalNote", "pyWiseDataValidationReport",
+               "pyCoordinatorTaskListReport"])
+check("old script no longer where the batch runners look (ops_reports_action/, co-ordinator reports/); "
+      "kept in archive/",
+      (os.path.exists(os.path.join(ROOT, "ops_reports_action", "pyAssignmentSubmissionsReport.py")),
+       os.path.exists(os.path.join(ROOT, "co-ordinator reports", "pyAssignmentSubmissionsReport.py")),
+       os.path.exists(os.path.join(ROOT, "archive", "pyAssignmentSubmissionsReport.py"))), (False, False, True))
+_arch = open(os.path.join(ROOT, "archive", "pyAssignmentSubmissionsReport.py"), encoding="utf-8").read()
+check("archived copy refuses to run unless --run-archived", ("RETIRED 2026-10-05" in _arch,
+      'if "--run-archived" not in sys.argv:' in _arch), (True, True))
+_live = []
+for _d in ("scripts", "common", "ops_reports_action", "ops_data_collection", "co-ordinator reports"):
+    for _r, _ds, _fs in os.walk(os.path.join(ROOT, _d)):
+        _ds[:] = [x for x in _ds if x not in ("_to_delete", "__pycache__")]
+        for _f in _fs:
+            if _f.endswith((".py", ".bat", ".ps1", ".yaml", ".json")):
+                _t = open(os.path.join(_r, _f), encoding="utf-8", errors="ignore").read()
+                if re.search(r"import\s+pyAssignmentSubmissionsReport|['\"]pyAssignmentSubmissionsReport['\"]"
+                             r"|pyAssignmentSubmissionsReport\.py['\"]", _t):
+                    _live.append(os.path.relpath(os.path.join(_r, _f), ROOT))
+check("no import / job / script path of the old report left in the runnable code", _live, [])
+check("the Performance Report does not import the old report any more",
+      ("pyAssignmentSubmissionsReport" in sys.modules, "ASR." in open(M.__file__, encoding="utf-8").read()),
+      (False, False))
+check("… its date / number parsing kept exactly (MM/DD/YYYY still read, as before)",
+      (M._parse_ist_date("13/10/2026 09:00:00 IST"), M._parse_ist_date("10/13/2026"),
+       M._parse_ist_date("2026-10-13"), M._parse_ist_date(""), M._safe_float(" 7.5 "), M._safe_float("x")),
+      (date(2026, 10, 13), date(2026, 10, 13), date(2026, 10, 13), None, 7.5, None))
+check("run summary: old report's rules removed",
+      "pyAssignmentSubmissionsReport" in open(os.path.join(ROOT, "common", "exec_summary.py"), encoding="utf-8").read(),
+      False)
 src = open(M.__file__, encoding="utf-8").read()
 check("nothing written to local disk", re.findall(r"open\([^)]*['\"][wa]b?['\"]|to_excel\(|MediaFileUpload", src), [])
 

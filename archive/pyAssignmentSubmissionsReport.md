@@ -1,3 +1,5 @@
+> **RETIRED 2026-10-05** — no longer runs in the Operations Morning batch; replaced by `ops_reports_action/pyAssignmentSubmissionPerformanceReport.py`. Kept for reference (see `archive/README.md`).
+
 # pyAssignmentSubmissionsReport.py — Assignment Submissions Report
 
 **Layer 2 — Operations Reports & Actions** · `ops_reports_action/`

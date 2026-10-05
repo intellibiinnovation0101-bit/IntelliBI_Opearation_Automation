@@ -40,7 +40,6 @@ TITLES = {
     "pyZohoSignatureStatusRefresh": "Zoho Sign Status",
     # ── Operations — Layer 2 ────────────────────────────────────────────────
     "pyAttendaceFeedbackReport": "Attendance & Feedback Report",
-    "pyAssignmentSubmissionsReport": "Assignment Submissions Report",
     "pyAssignmentSubmissionEmailReminder": "Assignment Reminders",
     "pyAssignmentSubmissionPerformanceReport": "Assignment Submission Performance",
     "pyBatchPlanner": "Batch Planner",
@@ -104,21 +103,17 @@ _R = {
         {"k": "last", "label": "Students covered", "re": r"Students:\s*(\d+)\s*\|\s*Absent"},
         {"k": "last", "label": "Absent", "re": r"Absent:\s*(\d+)"},
     ],
-    "pyAssignmentSubmissionsReport": [
-        {"k": "note_if", "re": r"\[Trigger\] Report generation skipped", "note": "No new submissions — report skipped (nothing to report)"},
-        {"k": "last", "label": "New submissions", "re": r"New submissions\s*:\s*(\d+)"},
-        {"k": "last", "label": "Updated submissions", "re": r"Updated submissions\s*:\s*(\d+)"},
-        {"k": "count", "label": "Reports generated", "re": r"\[Drive\] . Uploaded"},
-        {"k": "flag", "label": "E-mailed", "re": r"\[Email\] . Report sent to", "yes": "Yes", "no": "No"},
-    ],
     "pyAssignmentSubmissionPerformanceReport": [
         {"k": "count", "label": "Reports uploaded", "re": r"\[Drive\] Uploaded:", "zero": "keep"},
+        {"k": "count", "label": "Assignment PDFs uploaded", "re": r"\[Drive\] PDF uploaded:"},
         {"k": "sum", "label": "Eligible assignments", "re": r"Eligible assignments:\s*(\d+)", "zero": "keep"},
         {"k": "sum", "label": "Submitted", "re": r"\| Submitted:\s*(\d+)"},
         {"k": "sum", "label": "Not submitted", "re": r"\| Not submitted:\s*(\d+)"},
         {"k": "flag", "label": "E-mailed", "re": r"\[Email\] ✓ sent", "yes": "Yes", "no": "No"},
         {"k": "note_if", "re": r"\[CONFIG ERROR\]",
          "note": "A report period was not generated — configuration error (see log)"},
+        {"k": "note_if", "re": r"\[PDF FAILED\]",
+         "note": "Assignment PDFs not generated for a period — Sheets and e-mail still sent (see log)"},
     ],
     "pyAssignmentSubmissionEmailReminder": [
         {"k": "last", "label": "Students to notify", "re": r"Students to notify\s*:\s*(\d+)", "zero": "keep"},

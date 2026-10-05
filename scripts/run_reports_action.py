@@ -9,11 +9,12 @@ SKIPPED (logged) so it never publishes stale/incomplete data — while independe
 scripts still run.
 
     pyAttendaceFeedbackReport        <- SessionAttendance, StudentPayment
-    pyAssignmentSubmissionsReport    <- AssignmentSubmissions
     pyAssignmentSubmissionEmailReminder <- AssignmentSubmissions
     pyAssignmentSubmissionPerformanceReport <- AssignmentSubmissions
        Assignment Submission Performance + Non-Submission reports (Daily =
-       system date − 1; Weekly on Monday; Monthly on the 1st).
+       system date − 1; Weekly on Monday; Monthly on the 1st). It replaced
+       pyAssignmentSubmissionsReport (retired 2026-10-05; kept in archive/,
+       never run).
     pyBatchPlanner                   <- (independent — reads local data_inputs/)
     pyStudentProfileReport           <- SessionAttendance, AssignmentSubmissions, StudentPayment
     pyAdmissionFormalitiesReport     <- StudentPayment, ZohoSignatureStatus
@@ -44,8 +45,6 @@ LAYER = "Layer 2 — Operations Reports & Actions"
 JOBS = [
     ("pyAttendaceFeedbackReport", "Attendance & Feedback Report",
         ["pySessionAttendanceStudentTeacherFeedbacks", "pyStudentPaymentClassesStudentEnrolled"]),
-    ("pyAssignmentSubmissionsReport", "Assignment Submissions Report",
-        ["pyAssignmentSubmissions"]),
     ("pyAssignmentSubmissionEmailReminder", "Assignment Submission Email Reminder",
         ["pyAssignmentSubmissions"]),
     ("pyAssignmentSubmissionPerformanceReport", "Assignment Submission Performance Report",

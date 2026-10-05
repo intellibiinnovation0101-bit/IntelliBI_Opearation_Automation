@@ -1,3 +1,9 @@
+# =============================================================================
+#  RETIRED 2026-10-05 — replaced in the Operations Morning batch by
+#  ops_reports_action/pyAssignmentSubmissionPerformanceReport.py.
+#  Kept for reference only: it is not in any scheduled batch, and running it
+#  directly does nothing unless --run-archived is given.
+# =============================================================================
 """
 ================================================================================
   IntelliBI Assignment Submissions Report Generator
@@ -1644,4 +1650,10 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--run-archived" not in sys.argv:
+        print("pyAssignmentSubmissionsReport is RETIRED (archive/) — replaced by "
+              "ops_reports_action/pyAssignmentSubmissionPerformanceReport.py. "
+              "Not run. Pass --run-archived to run it anyway.")
+        sys.exit(0)
+    sys.argv.remove("--run-archived")
     main()

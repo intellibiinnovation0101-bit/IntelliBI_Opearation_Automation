@@ -4,7 +4,7 @@
   ASSIGNMENT SUBMISSION PERFORMANCE  +  ASSIGNMENT NON-SUBMISSION REPORTS
   (ops_reports_action / pyAssignmentSubmissionPerformanceReport.py)
   ------------------------------------------------------------------------------
-  Builds, for every planned reporting period, TWO native Google Sheets from ONE
+  Builds, for every planned reporting period, TWO native Google Sheets and assignment-wise PDFs from ONE
   shared dataset, so they always reconcile:
 
     A. Assignment Submission Performance Report  (management view)
@@ -20,17 +20,25 @@
          By Learner       — one row per learner with all their pending assignments
        → Drive: "Assignment Not Submitted Students List" 1PmpsLw-4L4woeznxYC_8bQnFQzHQYA2N
 
+    C. Assignment-wise Non-Submission PDFs  (one .pdf per eligible assignment)
+         A "Class | Duration | Assignment | Start | Deadline" banner, the
+         assignment's figures and its learners who had not submitted — exactly its
+         Not Submitted rows in A and B (same dataset). The reminder's approach:
+         one file per assignment, Assignment_<Class>_<Assignment>_<Kind>_<label>.pdf,
+         its PDF look.
+       → Drive: B's period folder, beside the Non-Submission Sheet
+
     Both under:  <root>/<Daily|Weekly|Monthly|Manual> Assignment Report/<period>/
 
   SOURCE & RULES (reused, not redefined)
     * Data: IntelliBIAssessmentSubmission ▸ Submissions — one row per enrolled
       learner per assignment, written by ops_data_collection/pyAssignmentSubmissions.py
       (enrolled = class roster ∪ everyone who submitted). Read with
-      pyAssignmentSubmissionsReport.read_sheet_df.
+      pyAssignmentSubmissionEmailReminder.read_sheet_df.
     * Expected learners of an assignment = its rows; Submitted = status other than
       "Not Submitted"; Not submitted = status "Not Submitted" — the same rule as
-      pyAssignmentSubmissionsReport (counts) and pyAssignmentSubmissionEmailReminder
-      (who is not submitted). One row per learner per assignment (duplicates
+      the retired pyAssignmentSubmissionsReport (counts; now in archive/) and
+      pyAssignmentSubmissionEmailReminder (who is not submitted). One row per learner per assignment (duplicates
       removed, a submitted row wins).
     * Learner active status (information only): the reminder's Students-tab check
       (pyAssignmentSubmissionEmailReminder.load_active_status_map / is_student_active).
@@ -90,8 +98,7 @@ for _p in (_HERE, os.path.join(_PROJECT, "co-ordinator reports")):
 import openpyxl                                      # noqa: E402
 from openpyxl.utils import get_column_letter         # noqa: E402
 
-import pyAssignmentSubmissionsReport as ASR          # noqa: E402  data reader, rules, style
-import pyAssignmentSubmissionEmailReminder as ASG    # noqa: E402  learner active status
+import pyAssignmentSubmissionEmailReminder as ASG    # noqa: E402  data reader, learner active status
 import pyAttendaceFeedbackReport as AR               # noqa: E402  report look & colour code
 import coordinator_periods as CP                     # noqa: E402  periods + folder names
 import coordinator_email as CE                       # noqa: E402  report e-mail
@@ -101,7 +108,7 @@ log = logging.getLogger("AssignmentSubmissionPerformance")
 # =============================================================================
 #  REPORT GENERATION CONTROL
 # =============================================================================
-GENERATE_AUTO    = False
+GENERATE_AUTO    = True
 
 GENERATE_DAILY   = True
 GENERATE_WEEKLY  = True
@@ -133,10 +140,19 @@ EMAIL_RECIPIENTS = ["info@intellibiinnovationstechnologies.in",
 # file, same link) — every run rebuilds and re-sends. False = keep the old file
 # and save the new one as "<name> - Version N".
 OVERWRITE_EXISTING = True
+# ONE PDF PER ASSIGNMENT with the learners who had not submitted it when the
+# deadline passed (same dataset — together they list exactly the Performance
+# Report's Not Submitted), uploaded into the period folder of the Non-Submission
+# root, beside the Non-Submission Sheet, and linked (folder) in the e-mail. A PDF
+# problem never stops the Sheets or the e-mail.
+GENERATE_NON_SUBMISSION_PDF = True
+# True = a PDF for EVERY eligible assignment (5 eligible → 5 PDFs; one where all
+# learners submitted says so). False = only assignments with non-submitters.
+PDF_FOR_FULLY_SUBMITTED = True
 
 IMPERSONATE_USER  = "info@intellibiinnovationstechnologies.in"
 SERVICE_ACCOUNT_FILE = os.path.join(CREDENTIALS_DIR, "service_account.json")
-SUBMISSION_SHEET_ID  = ASR.SUBMISSION_SHEET_ID      # IntelliBIAssessmentSubmission
+SUBMISSION_SHEET_ID  = ASG.SUBMISSION_SHEET_ID      # IntelliBIAssessmentSubmission
 SUBMISSIONS_TAB      = "Submissions"
 
 PERFORMANCE_ROOT_FOLDER_ID    = "190_1NRLGgwoLpqiiW0fPGZ85ux2QknZl"   # Assignment Submission Report
@@ -145,6 +161,10 @@ KIND_FOLDERS = {"Daily": "Daily Assignment Report", "Weekly": "Weekly Assignment
                 "Monthly": "Monthly Assignment Report", "Manual": "Manual Assignment Report"}
 PERFORMANCE_BASENAME    = "IntelliBI_Assignment_Submission_Performance_Report"
 NON_SUBMISSION_BASENAME = "IntelliBI_Assignment_Non_Submission_Report"
+# earlier PDF layouts, moved to the Drive trash when their period is re-run: the
+# single consolidated PDF, and the "Assignment-wise PDFs" subfolder
+LEGACY_PDF_BASENAME = "IntelliBI_Assignment_Non_Submission_Learners"
+LEGACY_PDF_SUBFOLDER = "Assignment-wise PDFs"
 
 DEADLINE_DEFAULT_TIME = time(23, 59, 59)    # deadline recorded without a time
 # Colour code of pyAttendaceFeedbackReport (Att % → Submission %): the % cell is
@@ -237,7 +257,7 @@ _DT_FORMATS = ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%
 def parse_ist_datetime(val, default_time=DEADLINE_DEFAULT_TIME):
     """'DD/MM/YYYY HH:MM:SS IST' (utils.to_ist_dmy, the collector's format) →
     naive IST datetime. A value with a date but no time gets `default_time`
-    (date part parsed by pyAssignmentSubmissionsReport._parse_ist_date).
+    (date part parsed by _parse_ist_date).
     None when unreadable."""
     if val is None:
         return None
@@ -249,7 +269,7 @@ def parse_ist_datetime(val, default_time=DEADLINE_DEFAULT_TIME):
             return datetime.strptime(s, fmt)
         except ValueError:
             continue
-    d = ASR._parse_ist_date(val)
+    d = _parse_ist_date(val)
     if d is None or (isinstance(d, float)) or str(d) == "NaT":
         return None
     try:
@@ -274,8 +294,37 @@ def is_not_submitted(status) -> bool:
     return str(status or "").strip().lower() == NOT_SUBMITTED.lower()
 
 
+def _parse_ist_date(val):
+    """'DD/MM/YYYY HH:MM:SS IST' (or similar) → date, None on failure. Kept
+    verbatim from the retired pyAssignmentSubmissionsReport (archive/), so date
+    handling is unchanged (it also accepts MM/DD/YYYY, unlike the reminder's)."""
+    import pandas as pd
+    if not val or str(val).strip() in ("", "nan", "None"):
+        return None
+    s = str(val).replace(" IST", "").strip()
+    for fmt in ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    try:
+        return pd.to_datetime(s, errors="coerce").date()
+    except Exception:
+        return None
+
+
+def _safe_float(val):
+    """Kept verbatim from the retired pyAssignmentSubmissionsReport (archive/)."""
+    import pandas as pd
+    try:
+        f = float(str(val).strip())
+        return f if not pd.isna(f) else None
+    except (ValueError, TypeError):
+        return None
+
+
 def _num(v):
-    f = ASR._safe_float(v)
+    f = _safe_float(v)
     return f
 
 
@@ -873,11 +922,211 @@ def build_non_submission_workbook(job, ds):
 
 
 # =============================================================================
+#  NON-SUBMISSION PDFs — ONE PDF PER ELIGIBLE ASSIGNMENT
+#  The approach of pyAssignmentSubmissionEmailReminder.generate_assignment_pdfs:
+#  one file per (class, assignment), named Assignment_<Class>_<Assignment>_… with
+#  its _sanitize_filename_part, and the look of its _build_single_assignment_pdf
+#  (reportlab, landscape A4, navy #1F3864 header table, row-coloured learner
+#  table, small footer). Built from the SAME dataset as both Sheets: a PDF lists
+#  exactly that assignment's "Not Submitted" rows, so the PDFs together list
+#  exactly the Performance Report's Not Submitted.
+# =============================================================================
+PDF_NAVY, PDF_META_BG, PDF_GRID = "#1F3864", "#F5F7FA", "#9E9E9E"
+PDF_ROW = {"Yes": "#FFEBEE",            # active learner — the reminder's "Final" red
+           "No": "#" + ROW_INACTIVE}    # inactive (Students tab = N) — amber + strikethrough,
+PDF_INACTIVE_TEXT = "#5D4037"           # as on the Learner Submission Detail tab
+PDF_ROW_OTHER = "#F5F5F5"               # active status not found / unknown
+
+
+def _pdf_esc(v):
+    from xml.sax.saxutils import escape
+    return escape(str(v if v not in (None, "") else "—"))
+
+
+def _pdf_dt(dt):
+    return dt.strftime("%d-%b-%Y %I:%M %p") if dt else "—"
+
+
+def _pdf_banner_text(a):
+    """'Class | Duration | Assignment | Start | Deadline' — the Learner Submission
+    Detail banner, in the same order (📝 replaced by the word: not in PDF fonts)."""
+    start = a["start"].strftime("%m/%d/%Y") if a["start"] else "—"
+    return (f"Class: {_pdf_esc(a['technology'])}  |  Duration: {_pdf_esc(a['batch'])}  |  "
+            f"Assignment: {_pdf_esc(a['title'])}  |  Start: {start}  |  "
+            f"Deadline: {a['deadline']:%m/%d/%Y}")
+
+
+def pdf_assignments(ds):
+    """The assignments that get a PDF: every eligible assignment of the period
+    (PDF_FOR_FULLY_SUBMITTED), otherwise only those with non-submitters."""
+    return [a for a in ds["assignments"] if a["not_submitted"] or PDF_FOR_FULLY_SUBMITTED]
+
+
+def pdf_filenames(job, ds):
+    """{(assessment_id, class_id): file name} —
+    Assignment_<Class>_<Assignment>_<Kind>_<label>.pdf. When two
+    assignments share class and title (two batches), the class duration is added;
+    if still not unique, the class id."""
+    san = ASG._sanitize_filename_part
+    period = re.sub(r"[^0-9A-Za-z\-]+", "_", job["label"]).strip("_")
+    asg = pdf_assignments(ds)
+
+    def stem(a, level):
+        parts = [san(a["technology"], 40), san(a["title"], 60)]
+        if level >= 1:
+            parts.append(san(a["batch"], 40))
+        if level >= 2:
+            parts.append(san(a["class_id"], 30))
+        return "Assignment_" + "_".join(parts)
+
+    out = {}
+    for a in asg:
+        for level in range(3):
+            st = stem(a, level)
+            if level == 2 or sum(1 for b in asg if stem(b, level) == st) == 1:
+                break
+        out[(a["assessment_id"], a["class_id"])] = f"{st}_{job['kind']}_{period}.pdf"
+    return out
+
+
+def _pending_per_learner(ds):
+    per = defaultdict(int)
+    for r in ds["rows"]:
+        if r["status"] == NOT_SUBMITTED:
+            per[_learner_key({"student_id": r["student_id"], "student_email": r["email"],
+                              "student_name": r["learner"]})] += 1
+    return per
+
+
+def build_assignment_pdf(job, ds, a, pending_per_learner=None) -> bytes:
+    """One assignment's PDF: header, the Class | Duration | Assignment | Start |
+    Deadline banner, the assignment's figures and the learners who had NOT
+    submitted when its deadline passed (active learners first, inactive last)."""
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+    per = pending_per_learner if pending_per_learner is not None else _pending_per_learner(ds)
+    xs = [r for r in a["rows"] if r["status"] == NOT_SUBMITTED]
+    # active learners first, inactive (struck through) last — presentation only
+    xs.sort(key=lambda r: ({"Yes": 0, "No": 2}.get(r["active"], 1), r["learner"].lower()))
+    C, P = colors.HexColor, Paragraph
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=12 * mm, rightMargin=12 * mm,
+                            topMargin=12 * mm, bottomMargin=14 * mm,
+                            title=f"IntelliBI Not Submitted — {a['technology']} — {a['title']}",
+                            author="IntelliBI Innovations Technologies")
+    ss = getSampleStyleSheet()
+    st_title = ParagraphStyle("T", parent=ss["Title"], fontSize=15, textColor=C(PDF_NAVY),
+                              spaceAfter=4, alignment=1)
+    st_sub = ParagraphStyle("S", parent=ss["Normal"], fontSize=10, textColor=C("#555555"),
+                            alignment=1, spaceAfter=8)
+    st_small = ParagraphStyle("Sm", parent=ss["Normal"], fontSize=9, leading=11)
+    st_cell = ParagraphStyle("C", parent=ss["Normal"], fontSize=8, leading=10)
+    st_cell_b = ParagraphStyle("CB", parent=st_cell, fontName="Helvetica-Bold")
+    st_center = ParagraphStyle("CC", parent=st_cell, alignment=1)
+    st_hcell = ParagraphStyle("HC", parent=ss["Normal"], fontSize=8, leading=10,
+                              textColor=colors.white, fontName="Helvetica-Bold", alignment=1)
+    st_label = ParagraphStyle("L", parent=st_small, textColor=colors.white, fontName="Helvetica-Bold")
+    st_banner = ParagraphStyle("B", parent=ss["Normal"], fontSize=10, leading=13,
+                               textColor=colors.white, fontName="Helvetica-Bold")
+
+    def grid(t, extra=()):
+        t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                               ("GRID", (0, 0), (-1, -1), 0.4, C(PDF_GRID)),
+                               ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                               ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4)]
+                              + list(extra)))
+        return t
+
+    story = [P("IntelliBI Assignment Submission — Not Submitted Follow-Up", st_title),
+             P(f"{_pdf_esc(job['kind'])} Report  |  Period: {_pdf_esc(job['label'])}  |  "
+               f"Generated: {_pdf_dt(ds['as_of'])} IST", st_sub),
+             grid(Table([[P(_pdf_banner_text(a), st_banner)]], colWidths=[273 * mm]),
+                  [("BACKGROUND", (0, 0), (-1, -1), C(PDF_NAVY))]),
+             Spacer(1, 6)]
+
+    # ── assignment figures (reminder's two-column meta table) ────────────────
+    rate = "—" if a["rate"] is None else f"{a['rate']:.1f}%"
+    rate_col = ("#2E7D32" if a["rate"] is not None and a["rate"] >= RATE_GOOD else
+                "#E65100" if a["rate"] is not None and a["rate"] >= RATE_WATCH else "#C62828")
+    active_n = sum(1 for x in xs if x["active"] == "Yes")
+    days = max(0, (ds["as_of"].date() - a["deadline"].date()).days)
+    ns_col = "#C62828" if a["not_submitted"] else "#2E7D32"
+    meta = [("Not Submitted", f"<font color='{ns_col}'><b>{a['not_submitted']}</b></font> of "
+                              f"{a['expected']} learner(s)  —  {active_n} active"),
+            ("Submitted", f"<b>{a['submitted']}</b>  (Submission % <font color='{rate_col}'><b>{rate}"
+                          f"</b></font>; on time {a['on_time']}, late {a['late']})"),
+            ("Deadline Passed", f"{_pdf_dt(a['deadline'])} IST  —  {days} day(s) before this report"),
+            ("Maximum Marks", _pdf_esc(a["max_marks"] or "—"))]
+    story += [grid(Table([[P(k, st_label), P(v, st_small)] for k, v in meta],
+                         colWidths=[45 * mm, 228 * mm], hAlign="LEFT"),
+                   [("BACKGROUND", (0, 0), (0, -1), C(PDF_NAVY)),
+                    ("BACKGROUND", (1, 0), (1, -1), C(PDF_META_BG))]),
+              Spacer(1, 8)]
+
+    if not xs:
+        story.append(grid(Table([[P(f"<b>All {a['expected']} learner(s) submitted this assignment — "
+                                    f"nothing to follow up.</b>", st_small)]], colWidths=[273 * mm]),
+                          [("BACKGROUND", (0, 0), (-1, -1), C("#E8F5E9"))]))
+    else:
+        rows = [[P(h, st_hcell) for h in ("#", "Learner", "Email", "Phone", "Active Learner",
+                                          "Pending in Period", "Follow-Up Notes")]]
+        cmds = [("BACKGROUND", (0, 0), (-1, 0), C(PDF_NAVY)), ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("ALIGN", (0, 0), (0, -1), "CENTER")]
+        for i, x in enumerate(xs, 1):
+            k = _learner_key({"student_id": x["student_id"], "student_email": x["email"],
+                              "student_name": x["learner"]})
+            n = per.get(k, 1)
+            pend = f"<b><font color='#C62828'>{n}</font></b>" if n > 1 else str(n)
+            cells = [(str(i), st_center), (_pdf_esc(x["learner"]), st_cell_b),
+                     (_pdf_esc(x["email"]), st_cell), (_pdf_esc(x["phone"]), st_cell),
+                     (_pdf_esc(x["active"]), st_center), (pend, st_center)]
+            if x["active"] == "No":                 # inactive: whole row struck through
+                cells = [(f"<strike><font color='{PDF_INACTIVE_TEXT}'>{re.sub(r'</?font[^>]*>', '', t)}"
+                          f"</font></strike>", st) for t, st in cells]
+            rows.append([P(t, st) for t, st in cells] + [P("", st_cell)])
+            cmds.append(("BACKGROUND", (0, i), (-1, i), C(PDF_ROW.get(x["active"], PDF_ROW_OTHER))))
+        tbl = Table(rows, colWidths=[10 * mm, 52 * mm, 72 * mm, 32 * mm, 24 * mm, 24 * mm, 59 * mm],
+                    repeatRows=1, hAlign="LEFT")
+        story.append(grid(tbl, cmds))
+
+    def footer(canvas, d):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(C("#888888"))
+        canvas.drawString(12 * mm, 7 * mm, f"Automated report — IntelliBI Innovations Technologies  |  "
+                                           f"{a['technology']} · {a['title']}  |  {job['kind']} {job['label']}")
+        canvas.drawRightString(d.pagesize[0] - 12 * mm, 7 * mm, f"Page {d.page}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    return buf.getvalue()
+
+
+def build_non_submission_pdfs(job, ds) -> list:
+    """One PDF per assignment (pdf_assignments), in the Performance Report's
+    order: [{"filename", "pdf_bytes", "technology", "batch", "assignment",
+    "assessment_id", "class_id", "pending", "expected"}]."""
+    names = pdf_filenames(job, ds)
+    per = _pending_per_learner(ds)
+    return [{"filename": names[(a["assessment_id"], a["class_id"])],
+             "pdf_bytes": build_assignment_pdf(job, ds, a, per),
+             "technology": a["technology"], "batch": a["batch"], "assignment": a["title"],
+             "assessment_id": a["assessment_id"], "class_id": a["class_id"],
+             "pending": a["not_submitted"], "expected": a["expected"]}
+            for a in pdf_assignments(ds)]
+
+
+# =============================================================================
 #  GOOGLE DRIVE  (impersonated info@, native Google Sheets, never overwritten)
 # =============================================================================
 FOLDER_MIME = "application/vnd.google-apps.folder"
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+PDF_MIME = "application/pdf"
 
 
 def _call(fn, what):
@@ -931,7 +1180,7 @@ def report_name(basename, job):
 
 def _existing(drive, folder_id, base):
     q = f"'{folder_id}' in parents and name contains '{_q(base)}' and trashed=false"
-    return _call(lambda: drive.files().list(q=q, fields="files(id,name,webViewLink)",
+    return _call(lambda: drive.files().list(q=q, fields="files(id,name,webViewLink,mimeType)",
                                             supportsAllDrives=True,
                                             includeItemsFromAllDrives=True).execute(),
                  "Drive: list reports").get("files", [])
@@ -944,65 +1193,118 @@ def resolve_period_folder(drive, root_id, job):
     return parent
 
 
-def _pick_existing(existing, base):
-    """The report to overwrite: the one named exactly <base>, otherwise the
+def _version_of(name, ext=""):
+    m = re.search(r"-\s*Version\s*(\d+)\s*" + re.escape(ext) + "$", name or "", re.I)
+    return int(m.group(1)) if m else None
+
+
+def _pick_existing(existing, base, ext=""):
+    """The report to overwrite: the one named exactly <base><ext>, otherwise the
     highest '- Version N' (older versions are left untouched)."""
-    exact = [f for f in existing if f.get("name") == base]
+    exact = [f for f in existing if f.get("name") == base + ext]
     if exact:
         return exact[0]
-    ver = lambda f: int((re.search(r"-\s*Version\s*(\d+)\s*$", f.get("name", ""), re.I) or [0, 0])[1])
-    return max(existing, key=ver)
+    return max(existing, key=lambda f: _version_of(f.get("name"), ext) or 0)
 
 
-def upload_workbook(drive, root_id, job, basename, wb) -> str:
-    """Upload as a native Google Sheet into <root>/<type>/<period>/. A report of
-    this period already there is overwritten in place (OVERWRITE_EXISTING: same
-    file id and link, content replaced); otherwise a new file is created."""
+def _upload(drive, root_id, job, base, data, media_mime, file_mime, link_fmt, ext="",
+            folder_id=None, where=None, tag="Uploaded"):
+    """Upload <data> as <base><ext> into <root>/<type>/<period>/ (or folder_id).
+    A file of this name already there (same type, or its '- Version N') is
+    overwritten in place (OVERWRITE_EXISTING: same file id and link, content
+    replaced); otherwise a new file is created."""
     from googleapiclient.http import MediaIoBaseUpload
-    folder_id = resolve_period_folder(drive, root_id, job)
-    base = report_name(basename, job)
-    existing = _existing(drive, folder_id, base)
-    buf = io.BytesIO()
-    wb.save(buf)                                     # in memory only — never written to disk
-    data = buf.getvalue()
-    media = lambda: MediaIoBaseUpload(io.BytesIO(data), mimetype=XLSX_MIME, resumable=False)
-    where = "/".join(period_folders(job))
+    folder_id = folder_id or resolve_period_folder(drive, root_id, job)
+    existing = [f for f in _existing(drive, folder_id, base)
+                if f.get("mimeType", file_mime) == file_mime
+                and (f.get("name") == base + ext or _version_of(f.get("name"), ext) is not None
+                     and re.fullmatch(re.escape(base) + r"\s*-\s*Version\s*\d+\s*" + re.escape(ext),
+                                      f.get("name") or ""))]
+    media = lambda: MediaIoBaseUpload(io.BytesIO(data), mimetype=media_mime, resumable=False)
+    where = where or "/".join(period_folders(job))
     if existing and OVERWRITE_EXISTING:
-        old = _pick_existing(existing, base)
+        old = _pick_existing(existing, base, ext)
         try:
             up = _call(lambda: drive.files().update(fileId=old["id"], media_body=media(),
                                                     fields="id,webViewLink",
                                                     supportsAllDrives=True).execute(),
                        f"Drive: overwrite {old['name']}")
-            link = up.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{old['id']}/edit"
-            print(f"[Drive] Uploaded: {where}/{old['name']}  (overwrote the existing report)")
+            link = up.get("webViewLink") or link_fmt.format(id=old["id"])
+            print(f"[Drive] {tag}: {where}/{old['name']}  (overwrote the existing report)")
             return link
         except Exception as exc:                                # noqa: BLE001
             # content replace refused → new file under the same name, old one to the
             # Drive trash (restorable there), so the folder still holds one report
             log.warning("In-place overwrite of %s failed (%s) — replacing the file.", old["name"], exc)
             up = drive.files().create(body={"name": old["name"], "parents": [folder_id],
-                                            "mimeType": SHEET_MIME},
+                                            "mimeType": file_mime},
                                       media_body=media(), fields="id,webViewLink",
                                       supportsAllDrives=True).execute()
             _call(lambda: drive.files().update(fileId=old["id"], body={"trashed": True},
                                                supportsAllDrives=True).execute(),
                   f"Drive: trash replaced {old['name']}")
-            print(f"[Drive] Uploaded: {where}/{old['name']}  (replaced the existing report; "
+            print(f"[Drive] {tag}: {where}/{old['name']}  (replaced the existing report; "
                   f"the old copy is in the Drive trash)")
-            return up.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{up['id']}/edit"
-    name = base
+            return up.get("webViewLink") or link_fmt.format(id=up["id"])
+    name = base + ext
     if existing:                                     # OVERWRITE_EXISTING = False
-        vers = [int(m.group(1)) for f in existing
-                for m in [re.search(r"-\s*Version\s*(\d+)\s*$", f.get("name", ""), re.I)] if m]
-        name = f"{base} - Version {max(vers + [1]) + 1}"
-    meta = {"name": name, "parents": [folder_id], "mimeType": SHEET_MIME}
+        vers = [v for f in existing for v in [_version_of(f.get("name"), ext)] if v]
+        name = f"{base} - Version {max(vers + [1]) + 1}{ext}"
+    meta = {"name": name, "parents": [folder_id], "mimeType": file_mime}
     # not retried: a lost response must never leave two copies of the report
     up = drive.files().create(body=meta, media_body=media(), fields="id,webViewLink",
                               supportsAllDrives=True).execute()
-    link = up.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{up['id']}/edit"
-    print(f"[Drive] Uploaded: {where}/{name}")
+    link = up.get("webViewLink") or link_fmt.format(id=up["id"])
+    print(f"[Drive] {tag}: {where}/{name}")
     return link
+
+
+def upload_workbook(drive, root_id, job, basename, wb) -> str:
+    """Upload as a native Google Sheet into <root>/<type>/<period>/ (see _upload)."""
+    buf = io.BytesIO()
+    wb.save(buf)                                     # in memory only — never written to disk
+    return _upload(drive, root_id, job, report_name(basename, job), buf.getvalue(), XLSX_MIME,
+                   SHEET_MIME, "https://docs.google.com/spreadsheets/d/{id}/edit")
+
+
+def _find_folder(drive, parent_id, name):
+    q = (f"'{parent_id}' in parents and name='{_q(name)}' and mimeType='{FOLDER_MIME}' "
+         f"and trashed=false")
+    return _call(lambda: drive.files().list(q=q, fields="files(id,name)", supportsAllDrives=True,
+                                            includeItemsFromAllDrives=True).execute(),
+                 f"Drive: find folder {name}").get("files", [])
+
+
+def upload_assignment_pdfs(drive, job, pdfs) -> dict:
+    """Upload each assignment PDF (PDF file, no conversion) into the period
+    folder of the Non-Submission root, beside the Non-Submission Sheet,
+    overwriting a same-name PDF in place. With OVERWRITE_EXISTING, assignment
+    PDFs of this period that no longer match an assignment, and the earlier
+    layouts (single consolidated PDF, "Assignment-wise PDFs" subfolder), go to
+    the Drive trash (restorable), so the folder always matches the report.
+    Returns {"folder_link", "links"}."""
+    folder_id = resolve_period_folder(drive, NON_SUBMISSION_ROOT_FOLDER_ID, job)
+    links = {}
+    for p in pdfs:
+        links[p["filename"]] = _upload(drive, NON_SUBMISSION_ROOT_FOLDER_ID, job, p["filename"][:-4],
+                                       p["pdf_bytes"], PDF_MIME, PDF_MIME,
+                                       "https://drive.google.com/file/d/{id}/view", ext=".pdf",
+                                       folder_id=folder_id, tag="PDF uploaded")
+    if OVERWRITE_EXISTING:
+        made = {p["filename"] for p in pdfs}
+        suffix = "_" + job["kind"] + "_" + re.sub(r"[^0-9A-Za-z\-]+", "_", job["label"]).strip("_") + ".pdf"
+        stale = [f for f in _existing(drive, folder_id, "Assignment_")
+                 if f.get("mimeType") == PDF_MIME and f.get("name", "").startswith("Assignment_")
+                 and f["name"].endswith(suffix) and f["name"] not in made]
+        stale += [f for f in _existing(drive, folder_id, report_name(LEGACY_PDF_BASENAME, job))
+                  if f.get("mimeType") == PDF_MIME]
+        stale += _find_folder(drive, folder_id, LEGACY_PDF_SUBFOLDER)
+        for f in stale:
+            _call(lambda f=f: drive.files().update(fileId=f["id"], body={"trashed": True},
+                                                   supportsAllDrives=True).execute(),
+                  f"Drive: trash {f['name']}")
+            print(f"[Drive] Moved to trash (no longer in this period's report): {f['name']}")
+    return {"folder_link": f"https://drive.google.com/drive/folders/{folder_id}", "links": links}
 
 
 # =============================================================================
@@ -1050,7 +1352,7 @@ def _tech_table_html(techs):
             f"border:1px solid #e2e8f0'><tr>{th}</tr>{''.join(trs)}</table>{legend}")
 
 
-def email_html(job, s, ds, perf_link, nonsub_link):
+def email_html(job, s, ds, perf_link, nonsub_link, pdf_link=None, pdf_count=None):
     E = CE._E
     rate_col = CE.band_color(s["rate"], RATE_GOOD, RATE_WATCH)
     body = CE.section("Submission Performance") + CE.card_block([
@@ -1072,6 +1374,13 @@ def email_html(job, s, ds, perf_link, nonsub_link):
                  f"<p style='margin:0;line-height:1.5'>The learners who did not submit are listed, "
                  f"with contact details, in the <a href='{E(nonsub_link)}' style='color:{CE.BTN};"
                  f"font-weight:600;text-decoration:none'>Assignment Non-Submission Report</a>.</p>")
+    if pdf_link:
+        n = pdf_count or 0
+        body += ((CE.section("Follow-up") if not nonsub_link else "") +
+                 f"<p style='margin:8px 0 0;line-height:1.5'>One printable PDF per assignment "
+                 f"({n} file{'s' if n != 1 else ''}) with its learners who did not submit is in the "
+                 f"<a href='{E(pdf_link)}' style='color:{CE.BTN};font-weight:600;"
+                 f"text-decoration:none'>Non-Submission folder of this period</a>.</p>")
     span = job["label"]
     intro = (f"Please find the <b>{E(job['kind'])}</b> Assignment Submission Performance report for "
              f"<b>{E(span)}</b>. It covers assignments whose deadline fell in this period and had "
@@ -1080,9 +1389,10 @@ def email_html(job, s, ds, perf_link, nonsub_link):
                    "Assignment Submission Performance Report")
 
 
-def send_email(job, s, ds, perf_link, nonsub_link) -> bool:
+def send_email(job, s, ds, perf_link, nonsub_link, pdf_link=None, pdf_count=None) -> bool:
     subject = f"{job['kind']} Assignment Submission Report - {job['label']}"
-    return CE.send(subject, email_html(job, s, ds, perf_link, nonsub_link), EMAIL_RECIPIENTS,
+    return CE.send(subject, email_html(job, s, ds, perf_link, nonsub_link, pdf_link, pdf_count),
+                   EMAIL_RECIPIENTS,
                    sender=EMAIL_SENDER, star=STAR_EMAIL_IN_GMAIL)
 
 
@@ -1090,10 +1400,32 @@ def send_email(job, s, ds, perf_link, nonsub_link) -> bool:
 #  RUN
 # =============================================================================
 def load_submissions(service):
-    df = _call(lambda: ASR.read_sheet_df(service, SUBMISSION_SHEET_ID, SUBMISSIONS_TAB),
+    df = _call(lambda: ASG.read_sheet_df(service, SUBMISSION_SHEET_ID, SUBMISSIONS_TAB),
                "Sheets: read Submissions")
     print(f"[Data] Submissions rows: {len(df)}")
     return df
+
+
+def _non_submission_pdfs(job, ds, s, out, drive):
+    """Build (and upload) one PDF per assignment into out[...]. Never raises: a
+    problem is reported and the Sheets / e-mail of the period still go out.
+    Nothing is uploaded unless the PDFs reconcile with the Performance Report."""
+    try:
+        pdfs = build_non_submission_pdfs(job, ds)
+        listed = sum(p["pending"] for p in pdfs)
+        if listed != s["not_submitted"] or len(pdfs) != len(pdf_assignments(ds)):
+            raise AssertionError(f"PDFs list {listed} learner row(s), the Performance Report "
+                                 f"{s['not_submitted']} — not reconciled, not uploaded")
+        out["pdfs"] = pdfs
+        out["pdf_info"] = {"files": len(pdfs), "pending": listed,
+                           "with_pending": sum(1 for p in pdfs if p["pending"])}
+        if drive is not None:
+            up = upload_assignment_pdfs(drive, job, pdfs)
+            out["pdf_link"], out["pdf_links"] = up["folder_link"], up["links"]
+    except Exception as exc:                                   # noqa: BLE001
+        log.exception("Non-Submission PDFs %s %s failed: %s", job["kind"], job["label"], exc)
+        print(f"[PDF FAILED] Non-Submission PDFs — {job['kind']} {job['label']}: {exc}")
+        out["pdf_error"] = str(exc)
 
 
 def run_jobs(jobs, subs_df, now, status_map=None, drive=None, upload=True, email=True):
@@ -1114,6 +1446,8 @@ def run_jobs(jobs, subs_df, now, status_map=None, drive=None, upload=True, email
                 out["nonsub_link"] = upload_workbook(drive, NON_SUBMISSION_ROOT_FOLDER_ID, job,
                                                      NON_SUBMISSION_BASENAME, ns_wb)
             out["workbooks"] = (perf_wb, ns_wb)
+            if GENERATE_NON_SUBMISSION_PDF:
+                _non_submission_pdfs(job, ds, s, out, drive if upload else None)
             rate = "—" if s["rate"] is None else f"{s['rate']:.1f}%"
             print(f"\n{'=' * 70}\n  Assignment Submission — {job['kind']} {job['label']}\n"
                   f"  Eligible assignments: {s['assignments']} | Expected: {s['expected']} | "
@@ -1121,10 +1455,14 @@ def run_jobs(jobs, subs_df, now, status_map=None, drive=None, upload=True, email
                   f"Submission {rate}\n"
                   f"  Learners pending: {s['learners_pending']} | Not yet due: {s['not_yet_due']} | "
                   f"No deadline (whole sheet): {s['no_deadline']}\n"
+                  + (f"  Assignment PDFs: {out['pdf_info']['files']} file(s) — "
+                     f"{out['pdf_info']['pending']} learner row(s) not submitted in "
+                     f"{out['pdf_info']['with_pending']} assignment(s)\n" if out.get("pdf_info") else "")
                   + ("  [Drive] upload OFF — built in memory only\n" if not out.get("perf_link")
                      else "") + "=" * 70)
             if email:
-                out["emailed"] = send_email(job, s, ds, out.get("perf_link"), out.get("nonsub_link"))
+                out["emailed"] = send_email(job, s, ds, out.get("perf_link"), out.get("nonsub_link"),
+                                            out.get("pdf_link"), len(out.get("pdfs") or []))
         except Exception as exc:                                   # noqa: BLE001
             log.exception("Assignment report %s %s failed: %s", job["kind"], job["label"], exc)
             print(f"[FAILED] Assignment Submission — {job['kind']} {job['label']}: {exc}")

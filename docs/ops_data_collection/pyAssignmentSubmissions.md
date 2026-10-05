@@ -33,7 +33,7 @@ Collects every student assignment (assessment) submission across all classes int
 Classes → timelines → assessments → submissions → flatten → upsert → write trigger.
 
 ## Email / report behaviour
-None directly; its trigger file drives `pyAssignmentSubmissionsReport.py`.
+None directly. Its trigger file was read only by `pyAssignmentSubmissionsReport.py`, which was retired on 2026-10-05 (`archive/`), so the trigger is no longer used by any report.
 
 ## Configuration used
 - `google.service_account_file`; Wise credentials. Cache under project `cache/` (assessments subfolder).
