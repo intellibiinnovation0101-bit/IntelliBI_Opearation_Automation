@@ -187,7 +187,7 @@ EMAIL_GROUP_LABELS = {
 #  GENERATE_AUTO = False → each GENERATE_* flag works independently (several can
 #  be True). The dates pin a specific period; None = today / this week / this
 #  month. Manual needs both dates (Start <= End).
-GENERATE_AUTO    = False
+GENERATE_AUTO    = True
 
 GENERATE_DAILY   = True
 GENERATE_WEEKLY  = False
