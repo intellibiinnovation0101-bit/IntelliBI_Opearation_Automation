@@ -201,7 +201,8 @@ FOLLOWUP_ACTIONS = {
     "assignment": ["Call", "WhatsApp", "WhatsApp Group", "Call & WhatsApp", "Email", "No response", "Other"],
     "admission":  ["Form Send", "Form Signed", "Call", "WhatsApp", "Call & WhatsApp", "Email", "Other",
                    "Not Applicable"],
-    "wise":       ["Corrected", "Invalid", "Call", "WhatsApp", "Call & WhatsApp", "Email", "Other"],
+    "wise":       ["Corrected", "Invalid", "Call", "WhatsApp", "Call & WhatsApp", "Email", "Other",
+                   "Not Applicable"],
     "instructor": ["Call", "WhatsApp", "Call & WhatsApp", "Email", "Other"],
     "interview":  ["Call", "WhatsApp", "Call & WhatsApp", "Email", "Other"],
 }

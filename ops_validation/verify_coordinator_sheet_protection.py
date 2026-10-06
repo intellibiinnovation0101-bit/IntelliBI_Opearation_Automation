@@ -384,6 +384,34 @@ for ws in wb.worksheets:
 check("every dropdown cell (Action Taken, Done?) is editable", dv_ok, True)
 
 
+def _lists(ws):
+    """{first column letter of the dropdown: [options]} for a tab."""
+    out = {}
+    for dv in ws.data_validations.dataValidation:
+        out.setdefault(str(dv.sqref).split()[0].rstrip("0123456789").split(":")[0],
+                       dv.formula1.strip('"').split(","))
+    return out
+
+
+_wise_dv = _lists(wb["Wise & Interview Feedback Validation"])
+check("Wise & Interview Feedback Validation ✎ Action Taken: existing options + 'Not Applicable'",
+      sorted(_wise_dv.values()),
+      sorted([["Corrected", "Invalid", "Call", "WhatsApp", "Call & WhatsApp", "Email", "Other",
+               "Not Applicable"], ["Yes", "No"]]))
+check("… other tabs' dropdowns unchanged",
+      (sorted(_lists(wb["Learner Assignment Follow-Ups"]).values()),
+       sorted(_lists(wb["Learner Admission Formalities"]).values())),
+      (sorted([["Call", "WhatsApp", "WhatsApp Group", "Call & WhatsApp", "Email", "No response", "Other"],
+               ["Yes", "No"]]),
+       sorted([["Form Send", "Form Signed", "Call", "WhatsApp", "Call & WhatsApp", "Email", "Other",
+                "Not Applicable"], ["Yes", "No"]])))
+check("… unchanged lists for Attendance / Instructor / Interview tabs",
+      {k: BC.FOLLOWUP_ACTIONS[k] for k in ("attendance", "instructor", "interview")},
+      {"attendance": ["Call", "WhatsApp", "Call & WhatsApp", "Email", "No response", "Other"],
+       "instructor": ["Call", "WhatsApp", "Call & WhatsApp", "Email", "Other"],
+       "interview": ["Call", "WhatsApp", "Call & WhatsApp", "Email", "Other"]})
+
+
 # =============================================================================
 print("\n== 2. upload_report → protected, then shared ==")
 EVENTS.clear()
