@@ -114,7 +114,8 @@ print("[pass] period Teacher Feedback Status uses the same rule")
 # ── 5. Batch Coordinator report uses the SAME helper (no second definition) ──
 bc = open(os.path.join(ROOT, "co-ordinator reports", "pyCoordinatorTaskListReport.py"),
           encoding="utf-8").read()
-assert bc.count("AR.teacher_feedback_session_ids(") == 2, "daily + period Instructor Follow-Ups must both use the shared rule"
+# daily Instructor Follow-Ups + review_instructor_sessions (performance report) + period tab
+assert bc.count("AR.teacher_feedback_session_ids(") == 3, "every Instructor Follow-Ups path must use the shared rule"
 assert 'set(tf_daily["session_id"]' not in bc and 'set(tf_period["session_id"]' not in bc
 print("[pass] Instructor Follow-Ups (daily + period) share AR.teacher_feedback_session_ids")
 

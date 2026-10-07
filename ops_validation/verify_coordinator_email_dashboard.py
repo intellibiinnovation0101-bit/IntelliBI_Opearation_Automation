@@ -166,9 +166,14 @@ P._now_ist = lambda: datetime(2026, 10, 5, 19, 0)
 P.BC.upload_report = _fake_upload
 P.UPLOAD_TO_DRIVE = True
 P.LEGACY_OUTPUT_DIR = legacy
+import tempfile as _tf                                       # noqa: E402
+P.OUTCOME_CHECKS_DIR = _tf.mkdtemp(prefix="outcome_checks_")   # never the real evening-check store
 P.GENERATE_AUTO = True
 P.SEND_EMAIL = True
 P.STAR_EMAIL_IN_GMAIL = False      # starring has its own test: verify_gmail_star.py
+# This file checks the EFFORT-ONLY e-mail / Dashboard contract (CHECK_OUTCOMES =
+# False). The Effort -> Outcome view is checked in verify_coordinator_outcomes.py.
+P.CHECK_OUTCOMES = False
 _out_before = tree(os.path.join(ROOT, "output"))
 _tmp_before = set(os.listdir(tempfile.gettempdir()))
 
@@ -212,7 +217,7 @@ check("e-mail display names (as specified)", P.EMAIL_GROUP_LABELS, {
     "Learner Attendance Follow-Ups": "Learner Attendance",
     "Learner Assignment Follow-Ups": "Learner Assignment",
     "Learner Admission Formalities": "Learner Admission Formalities",
-    "Wise & Interview Feedback Validation": "Learner Admission Formalities",
+    "Wise & Interview Feedback Validation": "Wise & Interview Feedback",   # was a copy of Admission's label
     "Instructor Follow-Ups": "Instructor Instructions",
     "Learner Instructor Interview Reminder": "Interview Reminder"})
 check("every registered task group has an e-mail display name",
@@ -318,17 +323,18 @@ print("\n== 3. Dashboard layout ==")
 wbk = uploaded_wb(res2[0])
 dash = wbk["Dashboard"]
 cells = [str(c.value) for row in dash.iter_rows() for c in row if c.value is not None]
-check("tabs: Pending & Overdue removed, the rest unchanged", wbk.sheetnames,
-      ["Dashboard", "Progress Trend", "Task Register", "Data Coverage & Rules"])
-check("NEEDS MANAGEMENT ATTENTION section and its rows removed",
-      [c for c in cells if "MANAGEMENT ATTENTION" in c.upper() or c in ("Act now", "Watch", "Info", "Data note")
-       or "Pending & Overdue" in c], [])
+check("tabs: Effort vs Outcome Trend added; Pending & Overdue stays removed", wbk.sheetnames,
+      ["Dashboard", "Effort vs Outcome Trend", "Progress Trend", "Task Register", "Data Coverage & Rules"])
+check("old task-level attention list (Act now / Watch / Data note chips) stays removed",
+      [c for c in cells if c in ("Act now", "Info", "Data note") or "Pending & Overdue" in c], [])
 check("'Missed (Overdue)' tile removed", "Missed (Overdue)" in cells, False)
 check("ASSESSMENT section removed", "  ASSESSMENT" in cells or "ASSESSMENT" in cells, False)
 hdr_row = [r for r in dash.iter_rows(values_only=True) if r and r[0] == "Task Group"][0]
-check("scorecard columns", [h for h in hdr_row if h],
-      ["Task Group", "Tasks", "Completed", "Pending", "Completion %", "Pending %", "Status"])
-check("dashboard is 7 columns wide (no empty columns left behind)", dash.max_column, 7)
+check("scorecard: the original 7 columns, then the 4 outcome columns", [h for h in hdr_row if h],
+      ["Task Group", "Tasks", "Completed", "Pending", "Completion %", "Pending %", "Status",
+       "Actual Performance %", "Target", "Performance / Impact", "Effort → Outcome"])
+NCD = len(P.DASH_COLS)
+check("dashboard is exactly the scorecard grid wide", dash.max_column, NCD)
 seen, overlap = set(), False
 for mr in dash.merged_cells.ranges:
     for r in range(mr.min_row, mr.max_row + 1):
@@ -336,28 +342,44 @@ for mr in dash.merged_cells.ranges:
             overlap = overlap or (r, c) in seen
             seen.add((r, c))
 check("no overlapping merged cells", overlap, False)
-check("no merge wider than the grid", max(mr.max_col for mr in dash.merged_cells.ranges), 7)
-_names = ["OVERALL COORDINATOR PERFORMANCE", "TASK GROUP SCORECARD", "NEEDS MANAGEMENT ATTENTION",
-          "COMPLETED VS PENDING BY TASK GROUP", "ASSESSMENT"]
+check("no merge wider than the grid", max(mr.max_col for mr in dash.merged_cells.ranges), NCD)
+_names = ["OVERALL COORDINATOR PERFORMANCE", "TASK GROUP SCORECARD", "EFFORT VS OUTCOME BY TASK GROUP",
+          "WHAT THIS REPORT ANSWERS", "NEEDS MANAGEMENT ATTENTION", "HEADLINE", "ASSESSMENT"]
 sections = [n for r in range(1, dash.max_row + 1)
             for n in _names if str(dash.cell(row=r, column=1).value or "").strip().startswith(n)]
-check("section order", sections,
-      ["OVERALL COORDINATOR PERFORMANCE", "TASK GROUP SCORECARD", "COMPLETED VS PENDING BY TASK GROUP"])
-_tot = [i for i, r in enumerate(dash.iter_rows(values_only=True), 1) if r and r[0] == "All task groups"][0]
-_chs = [i for i, r in enumerate(dash.iter_rows(values_only=True), 1)
-        if r and str(r[0] or "").strip().startswith("COMPLETED VS PENDING")][0]
-check("chart section follows the scorecard total row after one spacer row", _chs - _tot, 2)
+check("sections: Overall → Scorecard → chart; questions / attention removed", sections, _names[:3])
+_tile_row = [i for i, r in enumerate(dash.iter_rows(values_only=True), 1) if r and r[0] == "Tasks Generated"][0]
+_labels = [dash.cell(row=_tile_row + d, column=c).value for d in (0, 3) for c in range(1, NCD + 1)]
+check("KPI cards: 2 rows x 4 equal-width cards (A-B, C-E, F-H, I-K)",
+      ([sum(P.DASH_WIDTHS[a - 1:b]) for a, b in P.DASH_CARD_GROUPS],
+       sorted(str(m) for m in dash.merged_cells.ranges if m.min_row in (_tile_row, _tile_row + 1)))[0],
+      [47, 47, 47, 47])
+check("no footer / description row under the cards (label row, value row, gap, label row, value row)",
+      [dash.cell(row=_tile_row + d, column=1).value is not None for d in range(5)],
+      [True, True, False, True, True])
+check("8 tiles: the 7 effort tiles as before + Average Actual %", [x for x in _labels if x],
+      ["Tasks Generated", "Completed", "Pending", "Completion %", "Timely Completion %",
+       "Median Time to Complete",
+       "Attempted, Not Done" if res2[0]["job"]["kind"] == "Daily" else "Pending 2+ Days",
+       "Average Actual %"])
+check("headline line kept: 'completed X% of required actions — actual result …'",
+      any("Coordinator completed 33.3% of required actions (1 of 3)" in c for c in cells), True)
+check("no question / attention rows left", [c for c in cells if c.startswith(("1. How much", "6. Which"))], [])
 charts = dash._charts
 refs = [s.val.numRef.f for s in charts[0].series] if charts else []
-hdr_r = [i for i, r in enumerate(dash.iter_rows(values_only=True), 1) if r and r[0] == "Task Group"][0]
-check("chart reads the scorecard's Completed / Pending columns",
-      [f.split("!")[1].split(":")[0][:2] for f in refs], ["$C", "$D"])
-check("… starting under the scorecard header", refs[0].split("!")[1].split(":")[0], f"$C${hdr_r + 1}")
-check("print area set to the 7-column grid", dash.print_area.split("!")[1].split(":")[0], "$A$1")
+check("one chart, no supporting table: reads the scorecard's Completion % (E) and Actual % (H)",
+      (len(charts), [f.split("!")[1].split(":")[0][:2] for f in refs]), (1, ["$E", "$H"]))
+check("… starting at the first task-group row", refs[0].split("!")[1].split(":")[0],
+      f"$E${[i for i, r in enumerate(dash.iter_rows(values_only=True), 1) if r and r[0] == 'Task Group'][0] + 1}")
+check("… clustered horizontal bars, 0–110% axis, value labels on both series",
+      (charts[0].type, charts[0].grouping, charts[0].y_axis.scaling.min, charts[0].y_axis.scaling.max,
+       [bool(s.dLbls and s.dLbls.showVal) for s in charts[0].series]),
+      ("bar", "clustered", 0, 110, [True, True]))
+check("print area starts at A1", dash.print_area.split("!")[1].split(":")[0], "$A$1")
 blank_runs = 0
 run = 0
 for r in range(1, dash.max_row + 1):
-    empty = all(dash.cell(row=r, column=c).value in (None, "") for c in range(1, 8))
+    empty = all(dash.cell(row=r, column=c).value in (None, "") for c in range(1, NCD + 1))
     run = run + 1 if empty else 0
     blank_runs = max(blank_runs, run)
 check("no blank gap longer than one row between sections", blank_runs <= 1, True)

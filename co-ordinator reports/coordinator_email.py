@@ -304,10 +304,146 @@ def goals_section(groups, benchmark=95.0, group_labels=None, overall=None):
     return html
 
 
+_IMPACT_HEX = {"On target": GREEN, "Near target": AMBER, "Below target": RED}
+_QUAD_HEX = {"ok": GREEN, "medium": AMBER, "high": RED, "info": "0D47A1", "muted": MUTED}
+
+
+def _chip(text, hexc):
+    return (f"<span style='display:inline-block;padding:2px 8px;border-radius:999px;"
+            f"background:#{hexc}14;border:1px solid #{hexc}55;color:#{hexc};font-size:11px;"
+            f"font-weight:700'>{_E(text)}</span>")
+
+
+def _flow_cell(label, value, hexc, first=False):
+    """One step of the Task Group -> Effort -> Completion -> Outcome strip."""
+    arrow = ("" if first else
+             "<td style='width:14px;text-align:center;color:#b6c2d4;font-size:14px;"
+             "padding:0 2px'>&rarr;</td>")
+    return (arrow + "<td style='text-align:center;padding:6px 4px;background:#f7f9fc;"
+            "border:1px solid #e8edf5;border-radius:6px'>"
+            f"<div style='font-size:16px;font-weight:700;color:#{hexc};line-height:1.2'>{value}</div>"
+            f"<div style='font-size:10px;color:#5b6b86;margin-top:2px;text-transform:uppercase;"
+            f"letter-spacing:.04em'>{label}</div></td>")
+
+
+def _sub_label(text):
+    return ("<div style='font-size:10px;font-weight:700;letter-spacing:.08em;color:#8494ad;"
+            f"text-transform:uppercase;margin:12px 0 -4px'>{text}</div>")
+
+
+def _group_card(title, subtitle, chip_html, accent_hex, body_html, number=None):
+    """A bordered, separated block for one task group (e-mail-safe table)."""
+    num = (f"<span style='display:inline-block;min-width:20px;height:20px;line-height:20px;"
+           f"border-radius:10px;background:#{accent_hex};color:#ffffff;font-size:11px;"
+           f"font-weight:700;text-align:center;margin-right:8px'>{number}</span>"
+           if number is not None else "")
+    sub = (f"<div style='font-size:11px;color:#8494ad;margin-top:2px;padding-left:"
+           f"{'28px' if number is not None else '0'}'>{subtitle}</div>" if subtitle else "")
+    return ("<table role='presentation' width='100%' style='border-collapse:separate;"
+            "border-spacing:0;margin:14px 0 0;border:1px solid #dde4ee;"
+            f"border-left:4px solid #{accent_hex};border-radius:8px;background:#ffffff'>"
+            "<tr><td style='padding:10px 14px;background:#f4f7fb;border-bottom:1px solid #e8edf5;"
+            "border-top-right-radius:8px'>"
+            "<table role='presentation' width='100%' style='border-collapse:collapse'><tr>"
+            f"<td style='font-size:14.5px;font-weight:700;color:#1a2a48'>{num}{title}{sub}</td>"
+            f"<td style='text-align:right;vertical-align:top;white-space:nowrap'>{chip_html}</td>"
+            "</tr></table></td></tr>"
+            f"<tr><td style='padding:6px 14px 12px'>{body_html}</td></tr></table>")
+
+
+def effort_outcome_section(rows, benchmark=95.0, group_labels=None, headline=None,
+                           attention=None, quad_levels=None, overall=None):
+    """The upgraded "Performance vs Goals": ONE card per task group, read top to
+    bottom as Task Group -> Effort -> Completion -> Actual Outcome:
+      * header: the group, its registry name when the e-mail label differs, and
+        the Effort -> Outcome verdict chip (accent colour = the verdict);
+      * a 4-step strip: Tasks Generated -> Completed -> Task Completion % ->
+        Actual Performance %;
+      * an EFFORT bar (Task Completion % vs the completion benchmark) and an
+        OUTCOME bar (Actual Performance % vs the area's target).
+    "Overall Completion %" comes first in its own card. Presentation only: every
+    value, threshold and colour is the one computed before (same bars, same
+    rules). rows = pyCoordinatorTaskPerformanceReport.scorecard_rows."""
+    labels = group_labels or {}
+    quad_levels = quad_levels or {}
+    html = section("Performance vs Goals &nbsp;&middot;&nbsp; Effort &rarr; Outcome")
+    if headline:
+        html += (f"<div style='background:#f4f8fd;border-left:4px solid {HEADER};padding:10px 12px;"
+                 f"font-size:13.5px;line-height:1.45;margin:4px 0 10px'><b>{_E(headline)}</b></div>")
+    html += (f"<p style='margin:0 0 2px;color:#5b6b86;font-size:12px;line-height:1.5'>Each task group "
+             f"reads <b style='color:#1a2a48'>Effort &rarr; Completion &rarr; Actual Outcome</b>. "
+             f"Effort bar: Task Completion % (goal {benchmark:g}%) &nbsp;&middot;&nbsp; Outcome bar: "
+             f"Actual Performance % (goal = the area's target) &nbsp;&middot;&nbsp; "
+             f"<span style='color:#{GREEN}'>&#9632;</span> met "
+             f"<span style='color:#{AMBER}'>&#9632;</span> near <span style='color:#{RED}'>&#9632;</span> below</p>")
+    shown = 0
+    first = overall_goal_row(overall, benchmark)
+    if first:                                   # "Overall Completion %" first, as before
+        disp, name, done, n, p, met = first
+        body = bar(_E(disp), f"{done} / {n} &middot; {p:.1f}%", p, GREEN if met else RED,
+                   benchmark, f"Goal: {benchmark:g}% Task Completion &nbsp;&middot;&nbsp; {_E(name)}")
+        html += _group_card("All Task Groups", "", "", NAVY, body)
+    for r in rows:
+        s = r["s"]
+        if not s["tasks"] and r["actual"] is None:
+            continue
+        shown += 1
+        disp = labels.get(r["name"], r["name"])
+        q_hex = _QUAD_HEX.get(quad_levels.get(r["quadrant"], "muted"), MUTED)
+        chip = _chip(r["quadrant"], q_hex) if r["quadrant"] and r["quadrant"] != "—" else ""
+        # flow strip: Tasks Generated -> Completed -> Task Completion % -> Actual %
+        p = _pct1(s["completion_pct"]) if s["tasks"] else None
+        a = round(r["actual"], 1) if r["actual"] is not None else None
+        eff_hex = (GREEN if p >= benchmark else RED) if p is not None else MUTED
+        act_hex = _IMPACT_HEX.get(r["impact"], MUTED) if a is not None else MUTED
+        flow = ("<table role='presentation' width='100%' style='border-collapse:separate;"
+                "border-spacing:0;margin:8px 0 2px;table-layout:fixed'><tr>"
+                + _flow_cell("Tasks Generated", s["tasks"], NAVY, first=True)
+                + _flow_cell("Completed", s["completed"], NAVY)
+                + _flow_cell("Task Completion", f"{p:.1f}%" if p is not None else "&mdash;", eff_hex)
+                + _flow_cell("Actual Outcome", f"{a:.1f}%" if a is not None else "&mdash;", act_hex)
+                + "</tr></table>")
+        body = flow + _sub_label("Effort &middot; Completion")
+        if s["tasks"]:
+            body += bar("Effort &middot; Task Completion %", f"{s['completed']} / {s['tasks']} &middot; {p:.1f}%",
+                        p, GREEN if p >= benchmark else RED, benchmark,
+                        f"Goal: {benchmark:g}% of tasks completed")
+        else:
+            body += ("<div style='font-size:11.5px;color:#5b6b86;margin:10px 0 4px'>Effort: no Coordinator "
+                     "task in this period</div>")
+        body += _sub_label("Actual Outcome")
+        if a is not None:
+            t = r["target"]
+            body += bar(f"Outcome &middot; {_E(r['measure'])}", f"{a:.1f}%", a, act_hex, t,
+                        f"Target: {t:g}% &nbsp;&middot;&nbsp; {_E(r['basis'])}"
+                        + (f" &nbsp;&middot;&nbsp; {r['d_actual']:+.1f} pts vs previous period"
+                           if r.get("d_actual") is not None else ""))
+        else:
+            note = (r["o"] or {}).get("note") if r.get("o") else ""
+            body += ("<div style='font-size:11.5px;color:#5b6b86;margin:10px 0 4px'>Outcome: not measured"
+                     + (f" — {_E(note)}" if note else "") + "</div>")
+        html += _group_card(_E(disp), _E(r["name"]) if disp != r["name"] else "", chip, q_hex, body,
+                            number=shown)
+    if not shown:
+        html += ("<p style='margin:8px 0;color:#5b6b86;font-size:13px'>"
+                 "No tasks were generated and no outcome was measured in this period.</p>")
+    att = [a for a in (attention or []) if a[1] in ("high", "medium")]
+    if att:
+        html += section("Needs Management Attention")
+        html += table(["Area", "Why", "Action"],
+                      [[f"<b style='color:#{_QUAD_HEX.get(lev, MUTED)}'>{_E(area)}</b>", _E(why), _E(act)]
+                       for area, lev, why, act in att], align=["left", "left", "left"])
+    return html
+
+
 def performance_html(kind, label, s, groups, url, median_label, on_track=75.0, watch=45.0,
-                     benchmark=95.0, group_labels=None):
+                     benchmark=95.0, group_labels=None, outcome_rows=None, headline=None,
+                     attention=None):
     """Task Performance e-mail. s = summarise() of the period; groups =
-    [(group name, summarise() dict)] — the Dashboard scorecard rows."""
+    [(group name, summarise() dict)] — the Dashboard scorecard rows.
+    outcome_rows (the Effort → Outcome scorecard rows) switch "Performance vs
+    Goals" to the Effort → Outcome view; without them the completion-only
+    goals are shown (effort-only runs)."""
     c_hex = band_color(s["completion_pct"], on_track, watch)
     t_hex = band_color(s["timely_pct"], on_track, watch)
     st_hex = {"On track": GREEN, "Watch": AMBER, "Behind": RED}.get(s["status"], MUTED)
@@ -320,12 +456,25 @@ def performance_html(kind, label, s, groups, url, median_label, on_track=75.0, w
     body = (section(f"Overall &nbsp;&middot;&nbsp; <span style='color:#{st_hex}'>{_E(s['status'])}</span>")
             + section("Task Volume") + card_block(volume, 3)
             + section("Completion &amp; Timeliness") + card_block(quality, 3)
-            + goals_section(groups, benchmark, group_labels, overall=s))
+            + (effort_outcome_section(outcome_rows, benchmark, group_labels, headline, attention,
+                                      _quad_levels(), overall=s)
+               if outcome_rows else goals_section(groups, benchmark, group_labels, overall=s)))
     rows = []
+    act = {r["name"]: r for r in (outcome_rows or [])}
     for name, g in groups:
         if not g["tasks"]:
             continue
         gh = {"On track": GREEN, "Watch": AMBER, "Behind": RED}.get(g["status"], MUTED)
+        if outcome_rows:
+            r = act.get(name) or {}
+            a = r.get("actual")
+            rows.append([_E(name), g["tasks"], g["completed"],
+                         f"<b style='color:#{band_color(g['completion_pct'], on_track, watch)}'>"
+                         f"{_fmt_pct1(g['completion_pct'])}</b>",
+                         (f"<b style='color:#{_IMPACT_HEX.get(r.get('impact'), MUTED)}'>{a:.1f}%</b>"
+                          if a is not None else "—"),
+                         _E(r.get("impact", "—"))])
+            continue
         rows.append([_E(name), g["tasks"], g["completed"],
                      f"<b style='color:#{RED if g['pending'] else NAVY}'>{g['pending']}</b>",
                      f"<b style='color:#{band_color(g['completion_pct'], on_track, watch)}'>"
@@ -333,14 +482,28 @@ def performance_html(kind, label, s, groups, url, median_label, on_track=75.0, w
                      f"<b style='color:#{gh}'>{_E(g['status'])}</b>"])
     if rows:
         body += section("Task Groups") + table(
-            ["Task Group", "Tasks", "Completed", "Pending", "Completion %", "Status"], rows)
+            (["Task Group", "Tasks Generated", "Tasks Completed", "Task Completion %",
+              "Actual Performance %", "Performance / Impact"] if outcome_rows else
+             ["Task Group", "Tasks", "Completed", "Pending", "Completion %", "Status"]), rows)
     intro = (f"Please find the <b>{_E(kind)}</b> Coordinator task-performance report for "
              f"<b>{_E(label)}</b>. Here is a quick snapshot:")
-    closing = ('<p style="margin:20px 0 0;line-height:1.5">The full report covers the task-group '
+    closing = ('<p style="margin:20px 0 0;line-height:1.5">The full report covers the Effort &rarr; '
+               'Outcome scorecard, the effort-vs-outcome and progress trends, the task register '
+               '(every task, including every pending one) and how each figure is measured.</p>'
+               if outcome_rows else
+               '<p style="margin:20px 0 0;line-height:1.5">The full report covers the task-group '
                'scorecard, the progress trend and the task register (every task, including '
                'every pending one).</p>')
     return page(f"{kind} Coordinator Task Performance Report", label, intro, body, url,
                 f"{kind} Coordinator Task Performance Report", closing)
+
+
+def _quad_levels():
+    try:
+        import coordinator_outcomes as CO
+        return CO.QUAD_LEVEL
+    except Exception:                                         # pragma: no cover
+        return {}
 
 
 def batch_coordinator_html(kind, label, url, task_counts=None, note=None, today_label=None):

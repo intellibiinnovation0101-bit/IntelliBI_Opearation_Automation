@@ -237,8 +237,27 @@ def _cache_path(category: str, key: str = "") -> str:
     return os.path.join(CACHE_DIR, f"{category}.json")
 
 
+# Evening re-check (scripts/run_evening_reports.py): INTELLIBI_CACHE_MAX_AGE_SECONDS
+# caps every cache TTL below (e.g. 1800 = nothing older than 30 min is reused), so
+# fixes made in Wise during the day reach the sheet before the Coordinator
+# performance report re-checks them. Identity caches that never change during a
+# day (participant phones/e-mails) keep their own TTL. Unset = normal TTLs.
+_CACHE_CAP_EXEMPT = {"sp_participant"}
+
+
+def _effective_ttl(category: str, ttl_seconds: int) -> int:
+    cap = os.environ.get("INTELLIBI_CACHE_MAX_AGE_SECONDS", "").strip()
+    if not cap or category in _CACHE_CAP_EXEMPT:
+        return ttl_seconds
+    try:
+        return min(ttl_seconds, max(0, int(cap)))
+    except ValueError:
+        return ttl_seconds
+
+
 def _cache_get(category: str, key: str = "", ttl_seconds: int = 3600):
     """Read a cached JSON entry if it exists and is within TTL. Returns None if stale/missing."""
+    ttl_seconds = _effective_ttl(category, ttl_seconds)
     path = _cache_path(category, key)
     if not os.path.isfile(path):
         return None

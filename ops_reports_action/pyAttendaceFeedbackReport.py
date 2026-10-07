@@ -825,6 +825,46 @@ def _applicable(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def overall_att_kpi(att_f: pd.DataFrame, period: bool = False) -> dict:
+    """THE "📊 Overall Att %" of the Session Summary KPI strip — the single place it
+    is calculated (the Session Summary builders below and the Coordinator Task
+    Performance report all call this, so the figures can never disagree).
+
+    period=False (Daily Session Summary): every attendance row of the window (one
+    per student per session), attendance-applicable rows only; 2 decimals.
+    period=True (Weekly / Monthly / Manual Session Summary): unique
+    (session_id, student_id) pairs, phantom rows without a student/session id
+    dropped, attendance-applicable rows only; 1 decimal.
+    `att_f` = attendance rows of the window as returned by load_all_data
+    (suspended learners already removed). Returns
+    {"present", "absent", "applicable", "pct"} — pct 0.0 when nothing applies."""
+    if att_f is None or len(att_f) == 0:
+        return {"present": 0, "absent": 0, "applicable": 0, "pct": 0.0}
+    if not period:
+        app = _applicable(att_f)
+        n = len(app)
+        present = int((app["status"] == "Present").sum())
+        absent = int((app["status"] == "Absent").sum())
+        return {"present": present, "absent": absent, "applicable": n,
+                "pct": round(present / n * 100, 2) if n else 0.0}
+    _dedup_cols = [c for c in ["session_id", "student_id"] if c in att_f.columns]
+    att_dedup_kpi = att_f.drop_duplicates(subset=_dedup_cols) if _dedup_cols else att_f
+    # Drop phantom rows — handles both NaN (local Excel) AND empty string ""
+    # (Google Sheets API fills missing cells with "" not NaN).
+    if "student_id" in att_dedup_kpi.columns:
+        _sid = att_dedup_kpi["student_id"].astype(str).str.strip()
+        att_dedup_kpi = att_dedup_kpi[~_sid.isin(["", "nan", "None", "NaN"])]
+    if "session_id" in att_dedup_kpi.columns:
+        _sesid = att_dedup_kpi["session_id"].astype(str).str.strip()
+        att_dedup_kpi = att_dedup_kpi[~_sesid.isin(["", "nan", "None", "NaN"])]
+    app = _applicable(att_dedup_kpi)
+    n = len(app)
+    present = int((app["status"] == "Present").sum())
+    absent = int((app["status"] == "Absent").sum())
+    return {"present": present, "absent": absent, "applicable": n,
+            "pct": round(present / n * 100, 1) if n else 0.0}
+
+
 def _na_count(df: pd.DataFrame) -> int:
     """Number of attendance-NOT-applicable rows (blank / N) in the subset."""
     if "_attn_applicable" in df.columns:
@@ -926,12 +966,12 @@ def build_session_summary(ws, sess_f: pd.DataFrame, att_f: pd.DataFrame,
     if is_daily:
         # ── Daily ─────────────────────────────────────────────────────────────
         # Total Students = total attendance records (one per student per session).
-        att_f_app       = _applicable(att_f)
         total_enrolled  = len(att_f)                 # all enrolled (incl. N/A)
-        applicable_n    = len(att_f_app)             # attendance-applicable only
-        total_present   = int((att_f_app["status"] == "Present").sum())
-        total_absent    = int((att_f_app["status"] == "Absent").sum())
-        overall_pct     = round(total_present / applicable_n * 100, 2) if applicable_n else 0.0
+        _kpi            = overall_att_kpi(att_f, period=False)   # the shared Overall Att %
+        applicable_n    = _kpi["applicable"]         # attendance-applicable only
+        total_present   = _kpi["present"]
+        total_absent    = _kpi["absent"]
+        overall_pct     = _kpi["pct"]
         kpis = [
             ("Total Sessions", n_sessions,            "📚", KPI_BLUE),
             ("Total Students", total_enrolled,         "👥", KPI_BLUE),
@@ -2881,24 +2921,15 @@ def build_period_session_summary(ws, sess_f: pd.DataFrame, att_f: pd.DataFrame,
     # Also drop phantom/corrupt rows (null student_id or session_id) so they
     # don't inflate the KPI counts — these rows aren't linked to any real session
     # and are excluded from the per-course totals as well.
-    _dedup_cols = [c for c in ["session_id", "student_id"] if c in att_f.columns]
-    att_dedup_kpi = att_f.drop_duplicates(subset=_dedup_cols) if _dedup_cols else att_f
-    # Drop phantom rows — handles both NaN (local Excel) AND empty string ""
-    # (Google Sheets API fills missing cells with "" not NaN).
-    if "student_id" in att_dedup_kpi.columns:
-        _sid = att_dedup_kpi["student_id"].astype(str).str.strip()
-        att_dedup_kpi = att_dedup_kpi[~_sid.isin(["", "nan", "None", "NaN"])]
-    if "session_id" in att_dedup_kpi.columns:
-        _sesid = att_dedup_kpi["session_id"].astype(str).str.strip()
-        att_dedup_kpi = att_dedup_kpi[~_sesid.isin(["", "nan", "None", "NaN"])]
+    # Deduplicated, phantom rows dropped, applicable only — the shared
+    # overall_att_kpi(period=True) (also used by the Coordinator performance report).
     n_sess_kpi   = len(sess_f)
     n_stu_kpi    = att_f["student_id"].nunique() if "student_id" in att_f.columns else len(att_f)
-    # Present/Absent/Att% count attendance-applicable students only.
-    att_dedup_kpi_app = _applicable(att_dedup_kpi)
-    tot_pres_kpi = int((att_dedup_kpi_app["status"] == "Present").sum())
-    tot_abs_kpi  = int((att_dedup_kpi_app["status"] == "Absent").sum())
-    tot_enr_kpi  = len(att_dedup_kpi_app)
-    pct_kpi      = round(tot_pres_kpi / tot_enr_kpi * 100, 1) if tot_enr_kpi else 0.0
+    _kpi         = overall_att_kpi(att_f, period=True)
+    tot_pres_kpi = _kpi["present"]
+    tot_abs_kpi  = _kpi["absent"]
+    tot_enr_kpi  = _kpi["applicable"]
+    pct_kpi      = _kpi["pct"]
     kpis = [
         ("Total Sessions", n_sess_kpi,         "📚", KPI_BLUE),
         ("Total Students", n_stu_kpi,          "👥", KPI_BLUE),

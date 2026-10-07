@@ -13,6 +13,13 @@
     Formalities / Wise & Interview Feedback Validation / Instructor Follow-Ups /
     Interview Reminders — and any future group that carries the follow-up
     columns).
+    AND, next to that effort, the ACTUAL RESULT each group is meant to produce
+    (Effort -> Completion -> Outcome; coordinator_outcomes.py): Overall Att %,
+    Total Submission %, admission / Wise issues actually resolved at the evening
+    re-check, sessions without escalation, Overall Interview Attendance % —
+    each from its own report's calculation, with targets, Effort -> Outcome
+    quadrants, the change vs the previous period and the areas that need
+    management attention.
 
   SOURCE OF TRUTH  (read-only — nothing in the existing system is changed)
     The Batch Coordinator daily reports produced by
@@ -81,7 +88,7 @@
     versioned exactly like the Coordinator report ("- Version N"). Google Drive
     is the ONLY place a report is stored: the workbook is built in memory and
     uploaded from memory — no local copy, no temporary file.
-    Tabs: Dashboard | Progress Trend | Task Register |
+    Tabs: Dashboard | Effort vs Outcome Trend | Progress Trend | Task Register |
           Data Coverage & Rules
 
   RUN
@@ -130,6 +137,7 @@ from openpyxl.chart import BarChart, LineChart, Reference
 import pyCoordinatorTaskListReport as BC
 import coordinator_periods as CP              # shared periods + Drive layout
 import coordinator_email as CE                # shared e-mail (Operations Gmail account)
+import coordinator_outcomes as CO             # actual performance (outcome) measures
 
 AR = BC.AR
 try:
@@ -152,8 +160,8 @@ VERBOSE            = True
 # Sent through the Operations Gmail account in credentials/email_config.py.
 SEND_EMAIL       = True
 EMAIL_SENDER     = "info@intellibiinnovationstechnologies.in"
-EMAIL_RECIPIENTS = ["info@intellibiinnovationstechnologies.in",
-                    "intellibihropsb2ch@gmail.com"]
+EMAIL_RECIPIENTS = ["info@intellibiinnovationstechnologies.in"]#,
+                   # "intellibihropsb2ch@gmail.com"]
 # Star (★) each report e-mail in the sending Gmail account once it is sent
 # (common/gmail_star.py; best-effort — never affects sending or the run).
 STAR_EMAIL_IN_GMAIL = True
@@ -171,10 +179,32 @@ EMAIL_GROUP_LABELS = {
     "Learner Attendance Follow-Ups":         "Learner Attendance",
     "Learner Assignment Follow-Ups":         "Learner Assignment",
     "Learner Admission Formalities":         "Learner Admission Formalities",
-    "Wise & Interview Feedback Validation":  "Learner Admission Formalities",
+    "Wise & Interview Feedback Validation":  "Wise & Interview Feedback",
     "Instructor Follow-Ups":                 "Instructor Instructions",
     "Learner Instructor Interview Reminder": "Interview Reminder",
 }
+
+# =============================================================================
+#  ACTUAL PERFORMANCE (OUTCOME)  — coordinator_outcomes.py
+#  Effort (Task Completion %) is shown next to the RESULT it was meant to
+#  produce. Each area's Actual Performance % reuses its own report's figure
+#  (see coordinator_outcomes.py and the report's "Data Coverage & Rules" tab).
+# =============================================================================
+CHECK_OUTCOMES = True        # False = effort only (no source reads, no evening re-check)
+
+# Target per area — Actual Performance % at/above it = "On target". Attendance
+# uses the Attendance report's own green band (Overall Att % >= 75).
+OUTCOME_TARGETS = {
+    "attendance": 75.0,      # Overall Att %
+    "assignment": 80.0,      # Total Submission %
+    "admission":  75.0,      # admission issues resolved by the evening check
+    "wise":       75.0,      # Wise / interview-feedback issues resolved
+    "instructor": 90.0,      # held sessions without an escalation
+    "interview":  80.0,      # Overall Interview Attendance %
+}
+OUTCOME_NEAR_BAND = 15.0     # within this many points below target = "Near target"
+EFFORT_HIGH_PCT   = 75.0     # Task Completion % at/above = "High effort" (= On track band)
+TREND_DAYS_DAILY  = 7        # Daily report: the Effort vs Outcome trend shows the last N days
 
 # =============================================================================
 #  REPORT GENERATION CONTROL  (same scheme as pyLeadFollowUpAnalysisReport.py)
@@ -212,6 +242,12 @@ CACHE_DIR = os.path.join(_PROJECT, "cache", "coordinator_performance")
 # report is no longer written to disk; each run removes any such leftover copies
 # (only this report's own .xlsx files, then the folders they leave empty).
 LEGACY_OUTPUT_DIR = os.path.join(_PROJECT, "output", "reports", "coordinator_performance")
+# Evening re-check store (Admission / Wise): the evening state of a day cannot be
+# re-created later, so each delivered Daily report saves its checked items here
+# (one <YYYY-MM-DD>.json per report day) and Weekly / Monthly reports add them up.
+# Not shown in any report tab. Keep this folder — deleting it makes earlier days
+# "not checked" in later Weekly / Monthly reports.
+OUTCOME_CHECKS_DIR = os.path.join(_PROJECT, "cache", "coordinator_outcome_checks")
 
 # =============================================================================
 #  TASK GROUP REGISTRY
@@ -558,6 +594,12 @@ def _occurrence(group: dict, rec: dict):
         "stamp": _parse_stamp(_fu(FU_DT)),
         "action": _display(_fu(FU_ACTION)),
         "comment": _display(_fu(FU_COMMENT)),
+        # the row as the Coordinator saw it (display text, follow-up columns
+        # excluded) + its section banner: the morning baseline of the outcome
+        # re-check (coordinator_outcomes)
+        "cells": {k: _display(v) for k, v in cells.items()
+                  if _norm(k) not in {_norm(x) for x in BC.FOLLOWUP_COLS}},
+        "section": _display(rec["_ctx"].get("Section", "")),
     }
 
 
@@ -603,38 +645,43 @@ def _in_any(day: date, ranges) -> bool:
     return any(a <= day <= b for a, b in ranges)
 
 
-def discover_report_versions(drive, ranges) -> list:
-    """Every native-Sheet version of the DAILY Coordinator task report whose
-    report day falls inside one of `ranges` [(start, end), …].
-
-    Where they are read from (task origin = the report day):
+def _daily_folder_files(drive, ranges):
+    """(report day, folder name, file) for every native Sheet in the Daily report-
+    day folders whose day falls inside one of `ranges`:
       * <root>/Daily Coordinator Reports/Daily DD-Mon-YYYY/   (current layout)
-      * <root>/YYYY-MM-DD/                                     (legacy layout)
-    Only files named like the daily task report (BC.REPORT_BASENAME) are used —
-    Weekly / Monthly / Manual roll-ups have no follow-up columns and are not task
-    lists, and performance reports are never read back."""
+      * <root>/YYYY-MM-DD/                                     (legacy layout)"""
     root_children = _children(drive, BC.PARENT_FOLDER_ID, folders_only=True)
     day_folders = [f for f in root_children if CP._LEGACY_DAY_FOLDER.match(f.get("name", ""))]
     for f in root_children:
         if f.get("name") == CP.KIND_FOLDERS["Daily"]:
             day_folders += [x for x in _children(drive, f["id"], folders_only=True)
                             if CP._DAILY_FOLDER.match(x.get("name", ""))]
-    versions = []
     for f in day_folders:
         day = CP.daily_folder_date(f["name"])
         if day is None or not _in_any(day, ranges):
             continue
         for x in _children(drive, f["id"]):
-            if x.get("mimeType") != "application/vnd.google-apps.spreadsheet":
-                continue
-            if not x.get("name", "").startswith(BC.REPORT_BASENAME):
-                continue
-            m = _VERSION.search(x["name"])
-            versions.append({"id": x["id"], "name": x["name"], "day": day,
-                             "version": int(m.group(1)) if m else 1,
-                             "created": _drive_time_ist(x.get("createdTime", "")),
-                             "modified_raw": x.get("modifiedTime", ""),
-                             "folder": f["name"]})
+            if x.get("mimeType") == "application/vnd.google-apps.spreadsheet":
+                yield day, f["name"], x
+
+
+def discover_report_versions(drive, ranges) -> list:
+    """Every native-Sheet version of the DAILY Coordinator task report whose
+    report day falls inside one of `ranges` [(start, end), …] (task origin = the
+    report day; folders: _daily_folder_files).
+    Only files named like the daily task report (BC.REPORT_BASENAME) are used —
+    Weekly / Monthly / Manual roll-ups have no follow-up columns and are not task
+    lists, and performance reports are never read as task lists."""
+    versions = []
+    for day, folder, x in _daily_folder_files(drive, ranges):
+        if not x.get("name", "").startswith(BC.REPORT_BASENAME):
+            continue
+        m = _VERSION.search(x["name"])
+        versions.append({"id": x["id"], "name": x["name"], "day": day,
+                         "version": int(m.group(1)) if m else 1,
+                         "created": _drive_time_ist(x.get("createdTime", "")),
+                         "modified_raw": x.get("modifiedTime", ""),
+                         "folder": folder})
     versions.sort(key=lambda v: (v["day"], v["created"] or datetime.min, v["version"]))
     log.info("Found %d Coordinator report version(s) across %d report day(s).",
              len(versions), len({v["day"] for v in versions}))
@@ -643,7 +690,8 @@ def discover_report_versions(drive, ranges) -> list:
 
 def _cache_path(v):
     safe = re.sub(r"[^0-9A-Za-z]", "", v["modified_raw"])
-    return os.path.join(CACHE_DIR, f"{v['id']}_{safe}.json")
+    # _v2: occurrences carry the row cells + section (outcome re-check baseline)
+    return os.path.join(CACHE_DIR, f"{v['id']}_{safe}_v2.json")
 
 
 def _ser(parsed):
@@ -798,6 +846,7 @@ def build_ledger(versions: list, loader, now: datetime) -> dict:
                                              if any(o["key"] == k for o in tab["tasks"])}),
                     "versions_recorded": sorted({v["version"] for v in recorded}),
                     "in_final": k in final_keys,
+                    "cells": ref.get("cells", {}), "section": ref.get("section", ""),
                 })
                 cov["tasks"] += 1
         coverage.append(cov)
@@ -1058,30 +1107,46 @@ def _note(ws, row, ncols, text, italic=True, size=9, height=None, color=None, bg
     return row + 1
 
 
-def _kpi_tiles(ws, row, tiles, span=2):
-    """A strip of KPI tiles (label / big value / small note), each `span` columns
-    wide. tiles: [(label, value, note, level, number_fmt)]."""
-    for i, (label, value, note, level, fmt) in enumerate(tiles):
-        c0 = 1 + i * span
-        c1 = c0 + span - 1
-        bg, fg = BC.ds_level_colors(level)
-        for r, (val, size, bold, color, h) in enumerate(
-                [(label, 9, True, BC.DS_MUTED, 26), (value, 20, True, fg, 34),
-                 (note, 8, False, BC.DS_MUTED, 26)]):
-            if c1 > c0:
-                ws.merge_cells(start_row=row + r, start_column=c0, end_row=row + r, end_column=c1)
-            cell = ws.cell(row=row + r, column=c0)
-            cell.value = val
-            cell.font = AR._font(bold=bold, size=size, color=color)
-            cell.alignment = AR._align("center", "center", wrap=True)
-            if r == 1 and fmt:
-                cell.number_format = fmt
-            for cc in range(c0, c1 + 1):
-                x = ws.cell(row=row + r, column=cc)
-                x.fill = AR._fill(bg if r == 1 else ("FFFFFF" if level == "none" else BC.DS_GUIDE))
-                x.border = BC.ds_border()
-            ws.row_dimensions[row + r].height = h
-    return row + 3
+KPI_LABEL_ROW_PT, KPI_VALUE_ROW_PT, KPI_GAP_ROW_PT = 24, 44, 8
+
+
+def _kpi_cards(ws, row, cards, groups, per_row=4):
+    """Uniform KPI cards: a label strip over a large value, each card spanning one
+    column group of equal width (`groups` = [(first col, last col)], one per card
+    position in a row), `per_row` cards per row with a thin gap row between rows.
+    cards: [(label, value, level, number_fmt)]. No footer / description row.
+    Returns the next free row."""
+    from openpyxl.styles import Border, Side
+    edge = Side(style="thin", color="C9D3E0")
+    for k in range(0, len(cards), per_row):
+        for (label, value, level, fmt), (c0, c1) in zip(cards[k:k + per_row], groups):
+            bg, fg = BC.ds_level_colors(level)
+            value_bg = "FFFFFF" if level == "none" else bg
+            for r, (val, size, bold, color, fill) in enumerate(
+                    [(label, 9, True, BC.DS_MUTED, BC.DS_GUIDE), (value, 22, True, fg, value_bg)]):
+                rr = row + r
+                if c1 > c0:
+                    ws.merge_cells(start_row=rr, start_column=c0, end_row=rr, end_column=c1)
+                cell = ws.cell(row=rr, column=c0)
+                cell.value = val
+                cell.font = AR._font(bold=bold, size=size, color=color)
+                cell.alignment = AR._align("center", "center", wrap=False)
+                if r == 1 and fmt:
+                    cell.number_format = fmt
+                for cc in range(c0, c1 + 1):          # one outlined card: label + value
+                    x = ws.cell(row=rr, column=cc)
+                    x.fill = AR._fill(fill)
+                    x.border = Border(left=edge if cc == c0 else None,
+                                      right=edge if cc == c1 else None,
+                                      top=edge if r == 0 else None,
+                                      bottom=edge if r == 1 else Side(style="hair", color="DCE3EC"))
+            ws.row_dimensions[row].height = KPI_LABEL_ROW_PT
+            ws.row_dimensions[row + 1].height = KPI_VALUE_ROW_PT
+        row += 2
+        if k + per_row < len(cards):
+            ws.row_dimensions[row].height = KPI_GAP_ROW_PT   # breathing space between card rows
+            row += 1
+    return row
 
 
 def _bar_chart(ws, title, cats, series, anchor, stacked=True, height=7.5, width=16,
@@ -1146,69 +1211,346 @@ def _group_rows(ledger, tasks):
     return out
 
 
-# Dashboard grid: one column per scorecard column; the KPI tiles sit one per
-# column on the same grid, so tiles, scorecard and attention list share edges.
-DASH_COLS = ["Task Group", "Tasks", "Completed", "Pending", "Completion %", "Pending %", "Status"]
-DASH_WIDTHS = [38, 19, 19, 19, 19, 19, 19]
+# =============================================================================
+#  EFFORT -> OUTCOME  (periods, outcome view, scorecard, headline, attention)
+# =============================================================================
+def previous_period(kind: str, start: date, end: date):
+    """The period just before (Daily: the day before; Weekly: the week before;
+    Monthly: the month before; Manual: the same number of days before)."""
+    if kind == "Daily":
+        d = start - timedelta(days=1)
+        return d, d
+    if kind == "Weekly":
+        return start - timedelta(days=7), end - timedelta(days=7)
+    if kind == "Monthly":
+        pe = start - timedelta(days=1)
+        return pe.replace(day=1), pe
+    n = (end - start).days + 1
+    return start - timedelta(days=n), start - timedelta(days=1)
 
 
-def build_dashboard(ws, ledger, tasks, period_label, is_daily, now):
+def trend_days(kind: str, start: date, end: date, today: date) -> list:
+    """Daily: the last TREND_DAYS_DAILY days ending on the report day; Weekly /
+    Monthly / Manual: every day of the period up to today."""
+    if kind == "Daily":
+        return [end - timedelta(days=i) for i in range(TREND_DAYS_DAILY - 1, -1, -1)]
+    last = min(end, today)
+    return [start + timedelta(days=i) for i in range((last - start).days + 1)]
+
+
+def job_ranges(jobs, today: date) -> list:
+    """Report days each job needs: its period, the previous period (Δ) and the
+    trend days."""
+    out = []
+    for j in jobs:
+        ps, _pe = previous_period(j["kind"], j["start"], j["end"])
+        td = trend_days(j["kind"], j["start"], j["end"], today)
+        out.append((min([ps, j["start"]] + td[:1]), j["end"]))
+    return out
+
+
+def _effort_by_group(sc) -> dict:
+    out = {gk: summarise([t for t in sc["tasks"] if t["group"] == gk]) for gk in sc["groups"]}
+    out["_all"] = summarise(sc["tasks"])
+    return out
+
+
+def compute_outcome_view(engine, ledger, job, now) -> dict:
+    """Everything the Effort -> Outcome sheets and e-mail need for one job:
+    cur / prev outcomes per group, previous-period effort, the day-by-day trend
+    and (Daily) the evening-check detail rows. engine=None -> effort only."""
+    kind, start, end = job["kind"], job["start"], job["end"]
+    ps, pe = previous_period(kind, start, end)
+    view = {"enabled": engine is not None, "kind": kind, "cur": {}, "prev": {},
+            "prev_label": (ps.strftime("%d-%b-%Y") if ps == pe else
+                           f"{ps.strftime('%d-%b-%Y')} – {pe.strftime('%d-%b-%Y')}"),
+            "prev_eff": {}, "trend": [], "details": []}
+    psc = scope_ledger(ledger, ps, pe)
+    view["prev_eff"] = _effort_by_group(psc)
+    days_with_list = lambda sc: sorted({c["day"] for c in sc["coverage"] if c["versions"]})
+    if engine is not None:
+        sc = scope_ledger(ledger, start, end)
+        view["cur"] = engine.period_outcomes(kind, start, end, sc["tasks"], days_with_list(sc))
+        view["prev"] = engine.period_outcomes(kind, ps, pe, psc["tasks"], days_with_list(psc))
+        if kind == "Daily":
+            try:
+                view["details"] = engine.detail_rows(end, sc["tasks"])
+                view["details_live"] = (getattr(engine, "_day_details", {}).get(end) or {}
+                                        ).get("source") == "live"
+            except Exception as exc:                                  # noqa: BLE001
+                log.exception("Outcome detail %s failed: %s", end, exc)
+    for d in trend_days(kind, start, end, now.date()):
+        dsc = scope_ledger(ledger, d, d)
+        point = {"day": d, "eff": _effort_by_group(dsc), "act": {}}
+        if engine is not None:
+            point["act"] = engine.period_outcomes("Daily", d, d, dsc["tasks"], days_with_list(dsc))
+        view["trend"].append(point)
+    return view
+
+
+def _delta(a, b):
+    return None if a is None or b is None else round(a - b, 1)
+
+
+def scorecard_rows(ledger, tasks, view=None) -> list:
+    """One row per task group: effort (summarise) + outcome + verdicts."""
+    view = view or {}
+    rows = []
+    for gk, meta, s in _group_rows(ledger, tasks):
+        o = (view.get("cur") or {}).get(gk)
+        po = (view.get("prev") or {}).get(gk)
+        pe = (view.get("prev_eff") or {}).get(gk)
+        target = OUTCOME_TARGETS.get(gk)
+        comp = s["completion_pct"] if s["tasks"] else None
+        act = o["pct"] if o else None
+        rows.append({
+            "gk": gk, "name": meta["name"], "short": meta.get("short", meta["name"]), "s": s,
+            "o": o, "target": target, "completion": comp, "actual": act,
+            "measure": o["measure"] if o else (CO.MEASURES[gk][0] if gk in CO.MEASURES else "—"),
+            "basis": CO.basis_text(o) if o else ("not measured" if gk in CO.MEASURES else "—"),
+            "impact": (CO.outcome_status(act, target, OUTCOME_NEAR_BAND) if target is not None
+                       else "Not measured"),
+            "quadrant": (CO.quadrant(comp, act, target, EFFORT_HIGH_PCT) if target is not None
+                         else CO.QUAD_NA),
+            "d_actual": _delta(act, po["pct"] if po else None),
+            "d_completion": _delta(comp, pe["completion_pct"] if pe and pe["tasks"] else None),
+        })
+    return rows
+
+
+IMPACT_LEVEL = {"On target": "ok", "Near target": "medium", "Below target": "high",
+                "Not measured": "muted"}
+
+
+def _avg(vals):
+    vals = [v for v in vals if v is not None]
+    return round(sum(vals) / len(vals), 1) if vals else None
+
+
+def outcome_totals(rows) -> dict:
+    measured = [r for r in rows if r["actual"] is not None]
+    return {"measured": len(measured),
+            "on_target": sum(1 for r in measured if r["impact"] == "On target"),
+            "avg_actual": _avg(r["actual"] for r in measured),
+            "attention": attention_items(rows)}
+
+
+def headline(total, rows) -> str:
+    """'Coordinator completed X% of required actions — what actual result?' answered."""
+    if total["tasks"]:
+        eff = (f"Coordinator completed {total['completion_pct']:.1f}% of required actions "
+               f"({total['completed']} of {total['tasks']})")
+    else:
+        eff = "No Coordinator actions were required in this period"
+    ot = outcome_totals(rows)
+    if not ot["measured"]:
+        return eff + " — actual result not measured."
+    worst = min((r for r in rows if r["actual"] is not None),
+                key=lambda r: (r["actual"] - (r["target"] or 0)))
+    res = (f"actual result: {ot['on_target']} of {ot['measured']} areas on target "
+           f"(average {ot['avg_actual']:.1f}%)")
+    if worst["impact"] != "On target":
+        res += (f"; weakest: {worst['short']} {worst['actual']:.1f}% "
+                f"vs {worst['target']:g}% target")
+    return f"{eff} — {res}."
+
+
+def attention_items(rows) -> list:
+    """[(group short name, level, why, action)] — the areas a manager should act on."""
+    out = []
+    for r in rows:
+        q, s, a, t = r["quadrant"], r["s"], r["actual"], r["target"]
+        comp = r["completion"]
+        if q == CO.QUAD_ATTENTION:
+            out.append((r["short"], "high",
+                        f"Only {comp:.1f}% of {s['tasks']} task(s) completed and the result is "
+                        f"{a:.1f}% against a {t:g}% target.",
+                        "Make sure the list is worked in full today; review why tasks are left open."))
+        elif q == CO.QUAD_NOT_CONVERTING:
+            out.append((r["short"], "medium",
+                        f"{comp:.1f}% of tasks completed, but the result is only {a:.1f}% "
+                        f"(target {t:g}%) — {r['basis']}.",
+                        "Follow-ups are not changing the outcome: review the approach or escalate."))
+        elif q == CO.QUAD_NO_TASKS_LOW:
+            out.append((r["short"], "medium",
+                        f"Result {a:.1f}% is below the {t:g}% target, but no Coordinator task was raised.",
+                        "Check whether the task list should flag these cases."))
+        elif q == CO.QUAD_CHECK_TASKS:
+            out.append((r["short"], "info",
+                        f"Result on target ({a:.1f}%) with only {comp:.1f}% of tasks completed.",
+                        "Check whether these tasks are needed or can be simplified."))
+        if r["d_actual"] is not None and r["d_actual"] <= -10 and q not in (CO.QUAD_ATTENTION,):
+            out.append((r["short"], "medium",
+                        f"Result fell {abs(r['d_actual']):.1f} points vs the previous period.",
+                        "Look at what changed this period."))
+        o = r["o"]
+        if o and o["state"] == CO.ST_NOT_CHECKED:
+            out.append((r["short"], "muted", f"Actual result not measured: {o['note']}.",
+                        "Check the source / the evening refresh (see Data Coverage & Rules)."))
+    # one entry per area: most severe level first, its reasons and actions combined
+    order = {"high": 0, "medium": 1, "info": 2, "muted": 3}
+    merged = OrderedDict()
+    for area, lev, why, act in out:
+        m = merged.setdefault(area, [lev, [], []])
+        if order[lev] < order[m[0]]:
+            m[0] = lev
+        m[1].append(why)
+        if act not in m[2]:
+            m[2].append(act)
+    return sorted(((a, m[0], "  ".join(m[1]), "  ".join(m[2])) for a, m in merged.items()),
+                  key=lambda x: order[x[1]])
+
+
+def _fmt_p(p):
+    return "—" if p is None else f"{p:.1f}%"
+
+
+# Dashboard grid: the scorecard's 11 columns — the effort scorecard (Task Group …
+# Status) followed by the actual-outcome columns. The 8 KPI cards sit on the same
+# grid as 2 rows of 4 equal-width cards (DASH_CARD_GROUPS).
+DASH_COLS = ["Task Group", "Tasks", "Completed", "Pending", "Completion %", "Pending %", "Status",
+             "Actual Performance %", "Target", "Performance / Impact", "Effort → Outcome"]
+DASH_WIDTHS = [32, 15, 15, 16, 16, 15, 15, 17, 11, 17, 19]
+# KPI cards: 2 rows x 4 cards, each card one of these equal-width column groups
+# (A-B, C-E, F-H, I-K = 47 characters each).
+DASH_CARD_GROUPS = [(1, 2), (3, 5), (6, 8), (9, 11)]
+DASH_EFFORT_COLS = (2, 7)          # super-header "EFFORT" over these columns
+DASH_OUTCOME_COLS = (8, 11)        # super-header "ACTUAL OUTCOME" over these columns
+CHART_EFFORT_HEX, CHART_OUTCOME_HEX = "2F5597", "ED7D31"   # blue / orange (colour-blind safe)
+
+
+def _effort_outcome_chart(ws, anchor, first, last, n_groups, width_cm):
+    """Clustered horizontal bars per task group: Effort (Task Completion %) vs
+    Actual Performance %, read straight from the scorecard's own columns (no
+    separate data table). 0–100% axis, value labels, legend on top."""
+    from openpyxl.chart.label import DataLabelList
+    from openpyxl.chart.series import SeriesLabel
+    from openpyxl.chart.shapes import GraphicalProperties
+    from openpyxl.drawing.line import LineProperties
+    ch = BarChart()
+    ch.type = "bar"
+    ch.grouping = "clustered"
+    ch.title = "Effort vs Actual Outcome by Task Group"
+    ch.style = 10
+    ch.height = max(7.5, 2.2 + 1.35 * n_groups)
+    ch.width = width_cm
+    ch.gapWidth = 55
+    ch.overlap = -8
+    for col, label, colour in ((5, "Effort · Task Completion %", CHART_EFFORT_HEX),
+                               (8, "Actual Performance %", CHART_OUTCOME_HEX)):
+        ch.add_data(Reference(ws, min_col=col, min_row=first, max_row=last), titles_from_data=False)
+        s = ch.series[-1]
+        s.tx = SeriesLabel(v=label)
+        s.graphicalProperties.solidFill = colour
+        s.graphicalProperties.line.solidFill = colour
+        s.dLbls = DataLabelList()
+        s.dLbls.showVal = True
+        s.dLbls.showSerName = s.dLbls.showCatName = s.dLbls.showLegendKey = False
+        s.dLbls.numFmt = '0.0"%"'
+        s.dLbls.position = "outEnd"
+    ch.set_categories(Reference(ws, min_col=1, min_row=first, max_row=last))
+    ch.x_axis.scaling.orientation = "maxMin"           # first task group at the top
+    ch.x_axis.delete = False
+    ch.x_axis.tickLblSkip = 1
+    ch.y_axis.delete = False
+    ch.y_axis.scaling.min = 0
+    ch.y_axis.scaling.max = 110                        # room for the value labels
+    ch.y_axis.majorUnit = 25
+    ch.y_axis.number_format = '0"%"'
+    ch.y_axis.title = "% (0–100)"
+    ch.y_axis.crosses = "max"                          # value axis at the bottom (reversed categories)
+    ch.y_axis.majorGridlines.spPr = GraphicalProperties(ln=LineProperties(solidFill="E3E8EF"))
+    ch.legend.position = "t"
+    ws.add_chart(ch, anchor)
+    return ch
+
+
+def build_dashboard(ws, ledger, tasks, period_label, is_daily, now, view=None):
     NC = len(DASH_COLS)
     total = summarise(tasks)
+    rows = scorecard_rows(ledger, tasks, view)
+    ot = outcome_totals(rows)
     BC.ds_title(ws, NC, "Task Performance Dashboard", period_label,
-                "Coordinator task completion and timeliness, overall and per task group. "
-                "On time = completed on the task's report day (IST). Timely % = On time ÷ "
-                "every task with a measurable time (open tasks count as not yet on time). "
-                "Status bands: On track ≥ 75%, Watch ≥ 45%, Behind < 45% "
-                f"(worse of Completion % and Timely %).   As of {now.strftime('%d-%b-%Y %I:%M %p')} IST.")
+                "Coordinator task completion and timeliness (effort), next to the actual result in each "
+                "area (outcome). On time = completed on the task's report day (IST). Timely % = On time ÷ "
+                "every task with a measurable time (open tasks count as not yet on time). Status bands: "
+                "On track ≥ 75%, Watch ≥ 45%, Behind < 45% (worse of Completion % and Timely %). "
+                f"Effort → Outcome: high effort = Completion % ≥ {EFFORT_HIGH_PCT:g}%, good outcome = "
+                f"Actual ≥ target.   As of {now.strftime('%d-%b-%Y %I:%M %p')} IST.")
     for i, w in enumerate(DASH_WIDTHS, 1):              # widths first: the guide fit uses them
         ws.column_dimensions[_gcl(i)].width = w
     row = 4
+    # one-line headline: completed X% of required actions — what actual result?
+    row = _note(ws, row, NC, headline(total, rows), italic=False, size=11, height=24,
+                color=BC.DS_NAV, bg=BC.DS_SUB) + 1
 
-    # ── Overall coordinator performance (7 tiles, one per grid column) ──────
+    # ── Overall coordinator performance (7 effort tiles + Average Actual %) ──
     st = total["status"]
     row = BC.ds_section(ws, row, NC, f"OVERALL COORDINATOR PERFORMANCE   ·   {st}", level=1)
     lvl_c = _status_level(_status_word(total["completion_pct"]))
     lvl_t = _status_level(_status_word(total["timely_pct"]))
-    tiles = [
-        ("Tasks Generated", total["tasks"], f"{total['unique_items']} unique item(s)", "none", None),
-        ("Completed", total["completed"],
-         f"{total['on_time']} on time · {total['late']} late · {total['unknown']} no time", "ok", None),
-        ("Pending", total["pending"], "not completed yet",
-         "high" if total["pending"] else "ok", None),
+    avg = ot["avg_actual"]
+    cards = [
+        ("Tasks Generated", total["tasks"], "none", None),
+        ("Completed", total["completed"], "ok", None),
+        ("Pending", total["pending"], "high" if total["pending"] else "ok", None),
         ("Completion %", round(total["completion_pct"], 1) if total["completion_pct"] is not None else "—",
-         f"Pending {total['pending_pct']:.1f}%" if total["pending_pct"] is not None else "",
          lvl_c, PCT_FMT),
         ("Timely Completion %", round(total["timely_pct"], 1) if total["timely_pct"] is not None else "—",
-         f"{total['on_time']} of {total['timed_den']} done on their day" if total["timed_den"] else "no timed tasks",
          lvl_t, PCT_FMT),
-        ("Median Time to Complete", _fmt_hours(total["median_ttc"]),
-         "generation → Done (on-time tasks)", "info", None),
-        (("Attempted, Not Done", total["attempted"], "Done? = No / note, not completed",
-          "medium" if total["attempted"] else "ok", None) if is_daily else
-         ("Pending 2+ Days", total["carried"], "same item, consecutive report days in period",
-          "medium" if total["carried"] else "ok", None)),
+        ("Median Time to Complete", _fmt_hours(total["median_ttc"]), "info", None),
+        (("Attempted, Not Done", total["attempted"], "medium" if total["attempted"] else "ok", None)
+         if is_daily else
+         ("Pending 2+ Days", total["carried"], "medium" if total["carried"] else "ok", None)),
+        ("Average Actual %", avg if avg is not None else "—",
+         _status_level(_status_word(avg)) if avg is not None else "muted", PCT_FMT),
     ]
-    row = _kpi_tiles(ws, row, tiles, span=1) + 1
+    row = _kpi_cards(ws, row, cards, DASH_CARD_GROUPS) + 1
 
-    # ── Task group scorecard ───────────────────────────────────────────────
-    grows = _group_rows(ledger, tasks)
+    # ── Task group scorecard: effort columns, then the actual-outcome columns ──
     row = BC.ds_section(ws, row, NC, "TASK GROUP SCORECARD", level=1)
-    hdr_row = row
-    row = _hdr(ws, row, DASH_COLS, height=30)
+    for (c0, c1), text, fill in ((DASH_EFFORT_COLS, "EFFORT  ·  Coordinator task completion", BC.DS_NAV),
+                                 (DASH_OUTCOME_COLS, "ACTUAL OUTCOME  ·  result in the area", "7A4A12")):
+        ws.merge_cells(start_row=row, start_column=c0, end_row=row, end_column=c1)
+        for cc in range(c0, c1 + 1):
+            x = ws.cell(row=row, column=cc)
+            x.fill = AR._fill(fill)
+            x.border = BC.ds_border()
+        c = ws.cell(row=row, column=c0)
+        c.value = text
+        c.font = AR._font(bold=True, size=9, color=AR.C_WHITE)
+        c.alignment = AR._align("center", "center")
+    ws.row_dimensions[row].height = 18
+    row += 1
+    row = _hdr(ws, row, DASH_COLS, height=32)
     first = row
-    for i, (gk, meta, s) in enumerate(grows):
-        bg = _row_tint(_status_level(s["status"]) if s["tasks"] else "muted", BC.ds_zebra(i))
-        BC.ds_priority(ws, row, 1, meta["name"], _status_level(s["status"]) if s["tasks"] else "muted",
-                       h_align="left")
+    for i, r in enumerate(rows):
+        s, o = r["s"], r["o"]
+        lvl = _status_level(s["status"]) if s["tasks"] else "muted"
+        bg = _row_tint(lvl, BC.ds_zebra(i))
+        BC.ds_priority(ws, row, 1, r["name"], lvl, h_align="left")
         for col, v in ((2, s["tasks"]), (3, s["completed"]), (4, s["pending"])):
             BC.ds_cell(ws, row, col, v, bg=bg, h_align="center", bold=(col == 4 and v > 0),
                        fg=(BC.DS_HIGH_FG if col == 4 and v > 0 else BC.DS_TEXT))
         _pct_cell(ws, row, 5, s["completion_pct"], bg=bg, bold=True)   # bg only used for "—"
         _pct_cell(ws, row, 6, s["pending_pct"], bg=bg, level_by_status=False)
-        BC.ds_pill(ws, row, 7, s["status"] if s["tasks"] else "No tasks",
-                   _status_level(s["status"]) if s["tasks"] else "muted")
-        ws.row_dimensions[row].height = 20
+        BC.ds_pill(ws, row, 7, s["status"] if s["tasks"] else "No tasks", lvl)
+        # actual outcome
+        if r["actual"] is None:
+            c = BC.ds_cell(ws, row, 8, "—", bg=bg, h_align="center", fg=BC.DS_MUTED)
+        else:
+            c = BC.ds_pill(ws, row, 8, round(r["actual"], 1), IMPACT_LEVEL[r["impact"]],
+                           number_fmt=PCT_FMT)
+        basis = r["basis"] + (f" · {o['note']}" if o and o.get("note") else "")
+        if basis:                                        # measure + basis as a cell note
+            from openpyxl.comments import Comment
+            c.comment = Comment(f"{r['measure']}: {basis}", "IntelliBI")
+        BC.ds_cell(ws, row, 9, r["target"] if r["target"] is not None else "—", bg=bg,
+                   h_align="center", number_fmt='0"%"', fg=BC.DS_MUTED)
+        BC.ds_pill(ws, row, 10, r["impact"], IMPACT_LEVEL[r["impact"]])
+        BC.ds_pill(ws, row, 11, r["quadrant"], CO.QUAD_LEVEL.get(r["quadrant"], "muted")
+                   ).alignment = AR._align("center", "center", wrap=True)
+        ws.row_dimensions[row].height = 28          # room for a two-line Effort → Outcome chip
         row += 1
     last = row - 1
     tb = BC.DS_SUB                                       # total row
@@ -1218,19 +1560,25 @@ def build_dashboard(ws, ledger, tasks, period_label, is_daily, now):
     _pct_cell(ws, row, 5, total["completion_pct"], bold=True)
     _pct_cell(ws, row, 6, total["pending_pct"], bg=tb, bold=True, level_by_status=False)
     BC.ds_pill(ws, row, 7, total["status"], _status_level(total["status"]))
+    if avg is None:
+        BC.ds_cell(ws, row, 8, "—", bg=tb, h_align="center", fg=BC.DS_MUTED)
+    else:
+        _pct_cell(ws, row, 8, avg, bold=True)
+    BC.ds_cell(ws, row, 9, "", bg=tb)
+    BC.ds_cell(ws, row, 10, f"{ot['on_target']} of {ot['measured']} on target" if ot["measured"]
+               else "not measured", bg=tb, bold=True, size=9, h_align="center")
+    BC.ds_cell(ws, row, 11, "Actual % = simple average", bg=tb, size=8, h_align="center",
+               fg=BC.DS_MUTED, italic=True, wrap=True)
     ws.row_dimensions[row].height = 22
     row += 2                                             # one spacer row
 
-    # ── Chart: completed vs pending per task group (scorecard columns C:D) ──
-    if grows and total["tasks"]:
-        row = BC.ds_section(ws, row, NC, "COMPLETED VS PENDING BY TASK GROUP", level=2)
-        cats = Reference(ws, min_col=1, min_row=first, max_row=last)
-        series = [(Reference(ws, min_col=3, min_row=hdr_row, max_row=last), CHART_COLORS["completed"]),
-                  (Reference(ws, min_col=4, min_row=hdr_row, max_row=last), CHART_COLORS["remaining"])]
-        anchor, row = _chart_below(ws, row, 7.5)          # thin spacer, then the chart
-        _bar_chart(ws, "Completed vs Pending — per task group", cats, series, anchor,
-                   stacked=True, horizontal=True, height=7.5,
-                   width=round(_grid_width_cm(DASH_WIDTHS) - 0.4, 1), y_title="Tasks")
+    # ── Chart only: Effort vs Actual Outcome per task group ───────────────────
+    if rows and (total["tasks"] or ot["measured"]):
+        row = BC.ds_section(ws, row, NC, "EFFORT VS OUTCOME BY TASK GROUP", level=2)
+        h = max(7.5, 2.2 + 1.35 * len(rows))
+        anchor, row = _chart_below(ws, row, h)
+        _effort_outcome_chart(ws, anchor, first, last, len(rows),
+                              round(_grid_width_cm(DASH_WIDTHS) - 0.4, 1))
     BC.ds_fit_guide(ws, NC)
     ws.freeze_panes = "A3"
     ws.sheet_view.showGridLines = False
@@ -1241,6 +1589,182 @@ def build_dashboard(ws, ledger, tasks, period_label, is_daily, now):
     except Exception:                                    # pragma: no cover
         pass
     return ws
+
+
+# =============================================================================
+#  EFFORT VS OUTCOME TREND  (Is performance improving?)
+# =============================================================================
+OT_COLS = ["Day", "Tasks Generated", "Tasks Completed", "Task Completion %", "Areas Measured",
+           "Average Actual %"]
+OT_WIDTHS = [22, 16, 16, 18, 16, 18]
+
+
+def _trend_grid(ws, row, title, headers, data_rows, fmt_cols, ncols):
+    row = BC.ds_section(ws, row, ncols, title, level=1)
+    hdr = row
+    row = _hdr(ws, row, headers, height=30)
+    first = row
+    for i, vals in enumerate(data_rows):
+        bg = BC.ds_zebra(i)
+        for j, v in enumerate(vals, 1):
+            BC.ds_cell(ws, row, j, v if v is not None else None, bg=bg,
+                       h_align="left" if j == 1 else "center", bold=(j == 1),
+                       number_fmt=(PCT_FMT if j in fmt_cols else None))
+        row += 1
+    return hdr, first, row - 1, row
+
+
+def _effort_outcome_trend_chart(ws, anchor, first, last, width_cm, height_cm):
+    """Two lines over the days: Task Completion % (effort) vs Average Actual %
+    (outcome) — the same blue / orange as the Dashboard chart, markers and value
+    labels, fixed 0–100% scale, legend on top, gaps where a day has no value."""
+    from openpyxl.chart.label import DataLabelList
+    from openpyxl.chart.series import SeriesLabel
+    from openpyxl.chart.shapes import GraphicalProperties
+    from openpyxl.drawing.line import LineProperties
+    ch = LineChart()
+    ch.title = "Task Completion % vs Average Actual % — Day by Day"
+    ch.style = 12
+    ch.height, ch.width = height_cm, width_cm
+    ch.display_blanks = "gap"
+    for col, label, colour, pos in ((4, "Effort · Task Completion %", CHART_EFFORT_HEX, "t"),
+                                    (6, "Outcome · Average Actual %", CHART_OUTCOME_HEX, "b")):
+        ch.add_data(Reference(ws, min_col=col, min_row=first, max_row=last), titles_from_data=False)
+        s = ch.series[-1]
+        s.tx = SeriesLabel(v=label)
+        s.smooth = False
+        s.graphicalProperties.line.solidFill = colour
+        s.graphicalProperties.line.width = 32000
+        s.marker.symbol = "circle"
+        s.marker.size = 7
+        s.marker.graphicalProperties.solidFill = colour
+        s.marker.graphicalProperties.line.solidFill = "FFFFFF"
+        s.dLbls = DataLabelList()
+        s.dLbls.showVal = True
+        s.dLbls.showSerName = s.dLbls.showCatName = s.dLbls.showLegendKey = False
+        s.dLbls.numFmt = '0.0"%"'
+        s.dLbls.position = pos                     # effort labels above, outcome below the point
+    ch.set_categories(Reference(ws, min_col=1, min_row=first, max_row=last))
+    ch.x_axis.delete = False
+    ch.x_axis.tickLblSkip = 1
+    ch.x_axis.title = "Report day"
+    ch.y_axis.delete = False
+    ch.y_axis.scaling.min = 0
+    ch.y_axis.scaling.max = 110                    # headroom for the labels above 100%
+    ch.y_axis.majorUnit = 25
+    ch.y_axis.number_format = '0"%"'
+    ch.y_axis.title = "%"
+    ch.y_axis.majorGridlines.spPr = GraphicalProperties(ln=LineProperties(solidFill="E3E8EF"))
+    ch.legend.position = "t"
+    ws.add_chart(ch, anchor)
+    return ch
+
+
+def build_outcome_trend(ws, view, period_label, groups=None, rows=None):
+    """OVERALL — DAY BY DAY: per report day, Coordinator effort (tasks generated /
+    completed, Task Completion %) next to the outcome (areas measured, Average
+    Actual %), and one line chart comparing the two over time. Each day uses that
+    day's Daily definitions (view["trend"], compute_outcome_view)."""
+    NC = len(OT_COLS)
+    BC.ds_title(ws, NC, "Effort vs Outcome Trend", period_label,
+                "Coordinator effort vs actual outcome, day by day. Each day uses that day's Daily "
+                "definition. Average Actual % = simple average of the areas measured that day. "
+                "Blank = nothing measured that day.")
+    for i, w in enumerate(OT_WIDTHS, 1):
+        ws.column_dimensions[_gcl(i)].width = w
+    row = 4
+    trend = (view or {}).get("trend") or []
+    if not trend:
+        row = BC.ds_empty(ws, row, NC, "No days to show.", level="muted")
+    else:
+        data = []
+        for p in trend:
+            e = p["eff"]["_all"]
+            acts = [o["pct"] for o in p["act"].values() if o and o["pct"] is not None]
+            data.append([p["day"].strftime("%d-%b (%a)"), e["tasks"], e["completed"],
+                         round(e["completion_pct"], 1) if e["completion_pct"] is not None else None,
+                         len(acts), _avg(acts)])
+        _hdr_row, first, last, row = _trend_grid(ws, row, "OVERALL — DAY BY DAY", OT_COLS, data,
+                                                 {4, 6}, NC)
+        if len(trend) > 1:
+            row = BC.ds_section(ws, row + 1, NC,
+                                "TASK COMPLETION % VS AVERAGE ACTUAL % — DAY BY DAY", level=2)
+            height = 9.5
+            anchor, row = _chart_below(ws, row, height)
+            _effort_outcome_trend_chart(ws, anchor, first, last,
+                                        round(_grid_width_cm(OT_WIDTHS) - 0.4, 1), height)
+    BC.ds_fit_guide(ws, NC)
+    ws.freeze_panes = "A3"
+    ws.sheet_view.showGridLines = False
+    ws.sheet_view.zoomScale = 90
+    ws.sheet_properties.tabColor = BC.DS_SECTION
+    try:
+        ws.print_area = f"A1:{_gcl(NC)}{row}"
+    except Exception:                                    # pragma: no cover
+        pass
+    return ws
+
+
+# =============================================================================
+#  OUTCOME DETAIL  (Daily: every item re-checked in the evening — stored here,
+#  read back by the Weekly / Monthly reports)
+# =============================================================================
+def save_outcome_checks(day, details, folder=None):
+    """Store one report day's evening checks (Admission / Wise / Instructor items)
+    as <folder>/<YYYY-MM-DD>.json — read back by later Weekly / Monthly reports.
+    Written atomically; a failure is logged and never fails the report."""
+    folder = folder or OUTCOME_CHECKS_DIR
+    path = os.path.join(folder, f"{day.isoformat()}.json")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump([CO.detail_row_values(d) for d in details], fh, ensure_ascii=False)
+        os.replace(tmp, path)
+        return path
+    except Exception as exc:                                     # noqa: BLE001
+        log.warning("Could not store the evening checks of %s (%s).", day, exc)
+        return None
+
+
+def load_outcome_checks(day, folder=None):
+    """The stored evening checks of a report day ([details]), or None."""
+    path = os.path.join(folder or OUTCOME_CHECKS_DIR, f"{day.isoformat()}.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return [d for d in (CO.detail_from_values(v) for v in json.load(fh)) if d]
+    except Exception as exc:                                     # noqa: BLE001
+        log.warning("Stored evening checks of %s unreadable (%s).", day, exc)
+        return None
+
+
+def parse_outcome_detail(wb):
+    """LEGACY: the "Outcome Detail" tab that Daily reports carried until
+    07-Oct-2026 -> [details] (None when the report has no such tab). Only read
+    for days whose checks are not in OUTCOME_CHECKS_DIR."""
+    if CO.DETAIL_TAB not in wb.sheetnames:
+        return None
+    ws = wb[CO.DETAIL_TAB]
+    hdr_row = None
+    for r in range(1, min(ws.max_row or 0, 10) + 1):
+        if str(ws.cell(row=r, column=1).value or "").strip() == CO.DETAIL_COLS[0]:
+            hdr_row = r
+            break
+    if hdr_row is None:
+        return None
+    out = []
+    for vals in ws.iter_rows(min_row=hdr_row + 1, max_col=len(CO.DETAIL_COLS), values_only=True):
+        if not vals or vals[0] is None:
+            continue
+        v0 = vals[0]
+        if isinstance(v0, datetime):
+            vals = (v0.strftime("%Y-%m-%d"),) + tuple(vals[1:])
+        d = CO.detail_from_values(["" if v is None else v for v in vals])
+        if d:
+            out.append(d)
+    return out
 
 
 # Progress Trend grid: 10 columns (the day-wise table uses all of them); every
@@ -1496,61 +2020,321 @@ RULES = [
 ]
 
 
-def build_coverage(ws, cov_rows, period_label):
-    cols = ["Report Day", "Report Versions", "Versions with Follow-Up Columns", "Task Groups Tracked",
+OUTCOME_RULES = [
+    ("Effort → Outcome", "Effort = Task Completion % (the Coordinator's own follow-ups). Outcome = Actual "
+                         "Performance % — the result the work is meant to produce, from each area's own "
+                         "report. The two are shown side by side; neither is derived from the other."),
+    ("Attendance", "Overall Att % of the Attendance report's Session Summary (the same function). Daily = "
+                   "yesterday 12:00 PM → the time of the day's Coordinator task list (daily formula); "
+                   "Weekly / Monthly = sessions dated in the period (de-duplicated period formula). "
+                   "Suspended learners and attendance-not-required learners excluded, as in the report."),
+    ("Assignment", "Total Submission % READ from the corresponding generated Assignment Submission "
+                   "Performance report (its Summary tab). Daily report of day D = the Assignment Daily report "
+                   "generated that morning (deadlines of D-1); Weekly / Monthly / Manual = the Assignment "
+                   "report of the same period. If that report has not been generated yet (e.g. the Monthly "
+                   "Assignment report is made on the 1st of the next month) or cannot be read, the figure is "
+                   "calculated now with the Assignment report's own functions for the same period and marked "
+                   "PROVISIONAL in the Basis column."),
+    ("Admission", "Resolution % = learners on the day's Admission Formalities list whose admission form is "
+                  "SIGNED at the evening re-check ÷ learners still applicable. Signatures are refreshed "
+                  "in the evening (pyZohoSignatureStatusRefresh). Follow-Up Done? = Yes does not count."),
+    ("Wise & IV Feedback", "Resolution % = validation issues on the day's list fixed at the evening re-check ÷ "
+                           "issues still applicable — issue level (each failing field / failed check / "
+                           "missing interview feedback is one issue). Wise data refreshed in the evening "
+                           "with the same validation rules; interview feedback re-checked in the "
+                           "Interview Consolidate Sheet."),
+    ("Instructor", "Sessions Without Escalation % = held sessions of the day's window (yesterday 12:00 PM → "
+                   "task-list time; scheduled-only sessions excluded) that are NOT on the Instructor "
+                   "Follow-Ups list ÷ held sessions. A session counts once however many reasons flagged "
+                   "it; the reasons are counted separately."),
+    ("Interview", "Overall Interview Attendance % of the IntelliBI Interview Consolidated Report (interviewed ÷ "
+                  "scheduled; attended = not absent/skipped AND scored or published). Daily = yesterday → "
+                  "today; Weekly = Monday → today; Monthly = the 1st → today (or the period end)."),
+    ("Not applicable / not checked", "A learner / record no longer active or listed is 'No longer applicable' "
+                                     "and leaves the denominator. An item whose source could not be read "
+                                     "is 'Not checked' — excluded and reported, never guessed."),
+    ("Stored checks", "The evening state cannot be re-created later, so each delivered Daily report stores its "
+                      "checks on the reporting PC (cache/coordinator_outcome_checks); Weekly / Monthly reports "
+                      "add up the stored checks of their days "
+                      "(a day without a stored check is reported as not checked)."),
+    ("Targets", "  ·  ".join(f"{CO.MEASURES[k][0]} {v:g}%" for k, v in OUTCOME_TARGETS.items())
+                + f".  Near target = within {OUTCOME_NEAR_BAND:g} points."),
+    ("Quadrants", f"High effort = Task Completion % ≥ {EFFORT_HIGH_PCT:g}%; good outcome = Actual ≥ target.  "
+                  f"High·Good = {CO.QUAD_PAYING}; High·Low = {CO.QUAD_NOT_CONVERTING}; "
+                  f"Low·Good = {CO.QUAD_CHECK_TASKS}; Low·Low = {CO.QUAD_ATTENTION}."),
+]
+
+
+# ── Data Coverage & Rules: layout ─────────────────────────────────────────────
+# The rules above, grouped for reading (texts unchanged). A rule key not listed
+# here still appears, under "Other rules".
+RULE_SECTIONS = [
+    ("1", "DATA SOURCE & WHAT COUNTS AS A TASK", "info",
+     ["Source", "Task", "Versions", "Not trackable"]),
+    ("2", "REPORTING PERIODS", "info",
+     ["Reporting period", "Next day"]),
+    ("3", "EFFORT — TASK COMPLETION RULES", "info",
+     ["Completed", "Pending", "On time / Late", "Completion %", "Timely %", "Time to Complete",
+      "Status bands"]),
+    ("4", "ACTUAL PERFORMANCE — HOW EACH AREA IS MEASURED", "info",
+     ["Effort → Outcome", "Attendance", "Assignment", "Admission", "Wise & IV Feedback",
+      "Instructor", "Interview"]),
+    ("5", "TARGETS & EFFORT → OUTCOME VERDICTS", "info",
+     ["Targets", "Quadrants"]),
+    ("6", "IMPORTANT LIMITATIONS & CONDITIONS", "medium",
+     ["Not applicable / not checked", "Stored checks", "DateTime caveat"]),
+]
+COV_WIDTHS = [24, 13, 13, 12, 12, 13, 13, 13, 13, 15, 16]
+# report-day table: column groups (super-header) and short headers
+COV_GROUPS = [((1, 1), "REPORT DAY"), ((2, 3), "VERSIONS READ"), ((4, 7), "TASK GROUPS & TASKS"),
+              ((8, 11), "DATA-QUALITY CHECKS")]
+COV_COLS = ["Report Day", "Report Versions", "Versions with Follow-Up Columns", "Task Groups Tracked",
             "Task Groups Not Trackable", "Tasks Tracked", "Tasks Not Trackable",
             "Resolved Before Final Run", "Recorded in >1 Version", "Done Without Valid Time",
             "Yes / No Differ Across Versions"]
-    NC = len(cols)
+
+
+def _merged_text(ws, row, c0, c1, value, bg="FFFFFF", bold=False, fg=None, size=10,
+                 h_align="left", italic=False):
+    """A wrapped text cell merged over c0..c1, every cell bordered."""
+    if c1 > c0:
+        ws.merge_cells(start_row=row, start_column=c0, end_row=row, end_column=c1)
+    c = BC.ds_cell(ws, row, c0, value, bg=bg, bold=bold, fg=fg or BC.DS_TEXT, size=size,
+                   wrap=True, h_align=h_align, v_align="center", italic=italic)
+    for cc in range(c0 + 1, c1 + 1):
+        x = ws.cell(row=row, column=cc)
+        x.border = BC.ds_border()
+        x.fill = AR._fill(bg)
+    return c
+
+
+def _text_height(text, width_chars, size=10, min_pt=20):
+    """Row height (pt) for wrapped text in a merged cell `width_chars` wide."""
+    per_line = max(10, int(width_chars * (1.3 if size <= 9 else 1.2)))
+    lines = sum(max(1, -(-len(part) // per_line)) for part in str(text or "").split("\n"))
+    return max(min_pt, 14.5 * lines + 7)
+
+
+def _coverage_cards(ws, row, cov_rows, NC):
+    """At-a-glance strip: four equal cards summarising the report days read
+    (totals of the table below — no new figures)."""
+    days = len(cov_rows)
+    versions = sum(c["versions"] for c in cov_rows)
+    tracked = sum(c["tasks"] for c in cov_rows)
+    notes = sum(c["untracked_tasks"] + c["yes_no_time"] + c["conflicts"] for c in cov_rows)
+    cards = [("Report Days Read", days, "none", None),
+             ("Report Versions Read", versions, "none", None),
+             ("Tasks Tracked", tracked, "ok" if tracked else "muted", None),
+             ("Data Notes (amber cells)", notes, "medium" if notes else "ok", None)]
+    groups = [(1, 2), (3, 5), (6, 8), (9, 11)]
+    return _kpi_cards(ws, row, cards, groups)
+
+
+def _outcome_sources_table(ws, row, NC, rows, refresh_note):
+    """Where each Actual Performance % of this period comes from."""
+    # Area | Measure | Actual % | Target | Basis | Source | Note   (merged over the grid)
+    spans = [(1, 1), (2, 3), (4, 4), (5, 5), (6, 7), (8, 9), (10, 11)]
+    heads = ["Area", "Measure", "Actual %", "Target", "Basis", "Source", "Note"]
+    for (c0, c1), h in zip(spans, heads):
+        if c1 > c0:
+            ws.merge_cells(start_row=row, start_column=c0, end_row=row, end_column=c1)
+        for cc in range(c0, c1 + 1):
+            x = ws.cell(row=row, column=cc)
+            x.fill = AR._fill(BC.DS_NAV2)
+            x.border = BC.ds_border()
+        c = ws.cell(row=row, column=c0)
+        c.value = h
+        c.font = AR._font(bold=True, size=9, color=AR.C_WHITE)
+        c.alignment = AR._align("center", "center", wrap=True)
+    ws.row_dimensions[row].height = 24
+    row += 1
+    width = lambda c0, c1: sum(COV_WIDTHS[c0 - 1:c1])
+    for i, r in enumerate(r for r in rows if r["gk"] in CO.MEASURES):
+        o = r["o"]
+        bg = BC.ds_zebra(i)
+        note = (o or {}).get("note", "") if o else "outcomes not checked in this run"
+        if o and o.get("breakdown"):
+            note = (note + "  ·  " if note else "") + ", ".join(f"{k}: {v}" for k, v in o["breakdown"])
+        vals = [r["short"], r["measure"],
+                round(r["actual"], 1) if r["actual"] is not None else "—",
+                r["target"], r["basis"], CO.MEASURES[r["gk"]][2], note]
+        h = 22
+        for (c0, c1), v, k in zip(spans, vals, range(7)):
+            cell = _merged_text(ws, row, c0, c1, v, bg=bg, bold=(k == 0), size=9,
+                                h_align="center" if k in (2, 3) else "left",
+                                fg=BC.DS_NAV if k == 0 else None)
+            if k == 2 and v != "—":
+                cell.number_format = PCT_FMT
+            if k == 3:
+                cell.number_format = '0"%"'
+            if k not in (2, 3):
+                h = max(h, _text_height(v, width(c0, c1), size=9, min_pt=22))
+        ws.row_dimensions[row].height = h
+        row += 1
+    if refresh_note:
+        row = _note(ws, row, NC, f"Evening source refresh: {refresh_note}")
+    return row
+
+
+def build_coverage(ws, cov_rows, period_label, rows=None, refresh_note=""):
+    """Data Coverage & Rules, read top to bottom: at a glance → what data is
+    covered → where the actual performance comes from → the rules, grouped
+    (sources, periods, effort, outcome, targets, limitations)."""
+    NC = len(COV_COLS)
+    for c, w in enumerate(COV_WIDTHS, 1):              # widths first: heights depend on them
+        ws.column_dimensions[_gcl(c)].width = w
     BC.ds_title(ws, NC, "Data Coverage & Rules", period_label,
-                "What the figures are built from, and exactly how each measure is defined.")
-    row = BC.ds_section(ws, 3, NC, "REPORT DAYS READ", level=1)
-    row = _hdr(ws, row, cols, height=40)
+                "What the figures are built from, where each actual result comes from, and exactly how "
+                "every measure is defined.   Amber cell = a data note worth a look.")
+    row = 4
+
+    # ── At a glance ────────────────────────────────────────────────────────────
+    row = BC.ds_section(ws, row, NC, "AT A GLANCE", level=1)
+    row = _coverage_cards(ws, row, cov_rows, NC) + 1
+
+    # ── A. What data is covered ───────────────────────────────────────────────
+    row = BC.ds_section(ws, row, NC, "A.  WHAT DATA IS COVERED — Coordinator report days read", level=1)
+    for (c0, c1), text in COV_GROUPS:
+        if c1 > c0:
+            ws.merge_cells(start_row=row, start_column=c0, end_row=row, end_column=c1)
+        for cc in range(c0, c1 + 1):
+            x = ws.cell(row=row, column=cc)
+            x.fill = AR._fill(BC.DS_NAV)
+            x.border = BC.ds_border()
+        c = ws.cell(row=row, column=c0)
+        c.value = text
+        c.font = AR._font(bold=True, size=8, color=AR.C_WHITE)
+        c.alignment = AR._align("center", "center")
+    ws.row_dimensions[row].height = 16
+    row += 1
+    row = _hdr(ws, row, COV_COLS, height=44)
+    totals = [0] * 10
     for i, c in enumerate(cov_rows):
         bg = BC.ds_zebra(i)
         vals = [c["day"].strftime("%d-%b-%Y (%a)"), c["versions"], c["versions_fu"],
                 c["groups_tracked"], c["groups_untracked"], c["tasks"], c["untracked_tasks"],
                 c["dropped"], c["multi_version"], c["yes_no_time"], c["conflicts"]]
+        for k, v in enumerate(vals[1:]):
+            totals[k] += v or 0
         for j, v in enumerate(vals, 1):
             warn = (j in (7, 10, 11) and v) or (j == 3 and not v)
-            BC.ds_cell(ws, row, j, v, bg=(BC.DS_MED_BG if warn else bg), h_align="center",
-                       bold=(j == 1))
+            BC.ds_cell(ws, row, j, v, bg=(BC.DS_MED_BG if warn else bg), h_align="left" if j == 1 else "center",
+                       bold=(j == 1) or bool(warn), fg=(BC.DS_MED_FG if warn else BC.DS_TEXT))
+        ws.row_dimensions[row].height = 20
         row += 1
     if not cov_rows:
         row = BC.ds_empty(ws, row, NC, "No Coordinator report days found for this period.", level="muted")
-    row += 1
-    row = BC.ds_section(ws, row, NC, "RULES & DEFINITIONS", level=1)
-    for i, (k, v) in enumerate(RULES):
-        BC.ds_cell(ws, row, 1, k, bg=BC.DS_SUB, bold=True, fg=BC.DS_NAV)
-        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=NC)
-        BC.ds_cell(ws, row, 2, v, wrap=True, bg=BC.ds_zebra(i))
-        for cc in range(3, NC + 1):
-            ws.cell(row=row, column=cc).border = BC.ds_border()
-        ws.row_dimensions[row].height = 32
+    else:
+        BC.ds_cell(ws, row, 1, f"Total · {len(cov_rows)} day(s)", bg=BC.DS_SUB, bold=True)
+        for j, v in enumerate(totals, 2):
+            BC.ds_cell(ws, row, j, v, bg=BC.DS_SUB, bold=True, h_align="center")
+        ws.row_dimensions[row].height = 20
         row += 1
-    for c, w in enumerate([20, 11, 14, 12, 13, 11, 12, 13, 12, 13, 14], 1):
-        ws.column_dimensions[_gcl(c)].width = w
+        row = _note(ws, row, NC,
+                    "Amber = worth a look: no follow-up columns in any version, tasks that cannot be "
+                    "tracked, Done = Yes without a valid DateTime, or Yes / No differing between versions. "
+                    "None of these changes a figure silently — see section 6 below.", size=8)
+    row += 1
+
+    # ── B. Where the actual performance comes from ────────────────────────────
+    if rows:
+        row = BC.ds_section(ws, row, NC, "B.  WHERE THE ACTUAL PERFORMANCE COMES FROM — this period",
+                            level=1)
+        row = _outcome_sources_table(ws, row, NC, rows, refresh_note) + 1
+
+    # ── C. Rules & definitions, grouped ───────────────────────────────────────
+    row = BC.ds_section(ws, row, NC, "C.  RULES & DEFINITIONS", level=1)
+    texts = OrderedDict(RULES + OUTCOME_RULES)
+    used = set()
+    sections = list(RULE_SECTIONS)
+    leftover = [k for k in texts if not any(k in keys for *_x, keys in RULE_SECTIONS)]
+    if leftover:
+        sections.append((str(len(sections) + 1), "OTHER RULES", "info", leftover))
+    text_width = sum(COV_WIDTHS[1:])
+    for num, title, level, keys in sections:
+        keys = [k for k in keys if k in texts and k not in used]
+        if not keys:
+            continue
+        row = BC.ds_section(ws, row, NC, f"{num}.  {title}", level=2, height=20)
+        if level == "medium":                          # limitations: amber heading
+            hc = ws.cell(row=row - 1, column=1)
+            hc.fill = AR._fill(BC.DS_MED_BG)
+            hc.font = AR._font(bold=True, size=9, color=BC.DS_MED_FG)
+        for i, k in enumerate(keys):
+            used.add(k)
+            key_bg = BC.DS_MED_BG if level == "medium" else BC.DS_SUB
+            key_fg = BC.DS_MED_FG if level == "medium" else BC.DS_NAV
+            BC.ds_cell(ws, row, 1, k, bg=key_bg, bold=True, fg=key_fg, wrap=True, v_align="center")
+            _merged_text(ws, row, 2, NC, texts[k], bg=BC.ds_zebra(i))
+            ws.row_dimensions[row].height = _text_height(texts[k], text_width)
+            row += 1
+        ws.row_dimensions[row].height = 8                # breathing space between rule groups
+        row += 1
+
     BC.ds_fit_guide(ws, NC)
     ws.freeze_panes = "A3"
     ws.sheet_view.showGridLines = False
     ws.sheet_view.zoomScale = 90
     ws.sheet_properties.tabColor = BC.DS_MUTED
+    try:
+        ws.print_area = f"A1:{_gcl(NC)}{row}"
+    except Exception:                                    # pragma: no cover
+        pass
     return ws
 
 
-def build_workbook(ledger, start: date, end: date, period_label: str, is_daily: bool, now: datetime):
+def generated_on_text(now: datetime) -> str:
+    """'Generated On: 07-Oct-2026 11:30 AM' — the report's generation time (IST),
+    same wording and format as pyAssignmentSubmissionPerformanceReport._title."""
+    return f"Generated On: {now.strftime('%d-%b-%Y %I:%M %p')}"
+
+
+def stamp_generated_on(ws, now: datetime):
+    """Append '  |  Generated On: …' to the tab's existing row-1 header (the
+    merged title band). The cell keeps its merge, font, fill and alignment;
+    nothing is added when the header is empty or already stamped."""
+    c = ws.cell(row=1, column=1)
+    text = str(c.value or "").rstrip()
+    if not text or "Generated On:" in text:
+        return
+    c.value = f"{text}  |  {generated_on_text(now)}"
+    # a narrow tab (e.g. a Weekly label on the 6-column trend tab): let the title
+    # wrap onto a second line instead of being cut off at the band's edge
+    span = next((m for m in ws.merged_cells.ranges if m.min_row == 1 and m.min_col == 1), None)
+    last = span.max_col if span else 1
+    width = sum((ws.column_dimensions[_gcl(i)].width or 8.43) for i in range(1, last + 1))
+    if len(c.value) > width * 0.82:                   # ~chars that fit at the 13 pt bold title
+        c.alignment = AR._align(c.alignment.horizontal or "left", "center", wrap=True)
+        ws.row_dimensions[1].height = max(ws.row_dimensions[1].height or 0, 52)
+
+
+def build_workbook(ledger, start: date, end: date, period_label: str, is_daily: bool, now: datetime,
+                   view=None, refresh_note=""):
+    """view = compute_outcome_view(...) (None = effort only, outcomes shown as
+    not measured)."""
+    full_ledger = ledger
     ledger = scope_ledger(ledger, start, end)          # this period's tasks only
     tasks = ledger["tasks"]
     days = sorted({t["day"] for t in tasks})
     cov = ledger["coverage"]
+    if view is None:
+        view = compute_outcome_view(None, full_ledger,
+                                    {"kind": "Daily" if is_daily else "Manual",
+                                     "start": start, "end": end}, now)
+    rows = scorecard_rows(ledger, tasks, view)
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
-    build_dashboard(wb.create_sheet("Dashboard"), ledger, tasks, period_label, is_daily, now)
+    build_dashboard(wb.create_sheet("Dashboard"), ledger, tasks, period_label, is_daily, now, view)
+    build_outcome_trend(wb.create_sheet("Effort vs Outcome Trend"), view, period_label,
+                        ledger["groups"], rows)
     build_trend(wb.create_sheet("Progress Trend"), ledger, tasks, period_label, days, is_daily, now,
                 period_text=(start.strftime("%d-%b-%Y") if start == end else
                              f"{start.strftime('%d-%b-%Y')} to {end.strftime('%d-%b-%Y')}"))
     build_register(wb.create_sheet("Task Register"), ledger, tasks, period_label)
-    build_coverage(wb.create_sheet("Data Coverage & Rules"), cov, period_label)
+    build_coverage(wb.create_sheet("Data Coverage & Rules"), cov, period_label, rows=rows,
+                   refresh_note=refresh_note)
+    for ws in wb.worksheets:                          # every tab: header + "Generated On"
+        stamp_generated_on(ws, now)
     for ws in wb.worksheets:                          # print: landscape, one page wide
         try:
             ws.page_setup.orientation = "landscape"
@@ -1581,31 +2365,49 @@ def _file_name(job) -> str:
     return f"{REPORT_BASENAME}_{job['kind']}_{safe}"
 
 
-def run_jobs(jobs, versions, loader, now, upload=None):
+def run_jobs(jobs, versions, loader, now, upload=None, engine=None, refresh_note=""):
     """Build (and deliver) one workbook per job. The ledger is built once from
     the discovered versions; every job is then scoped to its own period
     (scope_ledger), so jobs never borrow each other's tasks. A failing job is
     recorded and the remaining jobs still run. Each workbook exists only in
-    memory and is uploaded from there — nothing is written to local disk."""
+    memory and is uploaded from there — nothing is written to local disk.
+    engine = coordinator_outcomes.OutcomeEngine (None = effort only)."""
     ledger = build_ledger(versions, loader, now)
     log.info("Ledger: %d trackable task(s) across %d report day(s).",
              len(ledger["tasks"]), len({t["day"] for t in ledger["tasks"]}))
+    if engine is not None:
+        cutoffs = {}
+        for v in versions:
+            if v.get("created") and (v["day"] not in cutoffs or v["created"] > cutoffs[v["day"]]):
+                cutoffs[v["day"]] = v["created"]
+        engine.cutoffs.update(cutoffs)
     results = []
     for job in jobs:
         name = _file_name(job)
         folders = CP.folder_path(job["kind"], job["start"], job["end"])
         out = {"job": job, "name": name, "folder": "/".join(folders)}
         try:
+            view = compute_outcome_view(engine, ledger, job, now)
             wb, tasks, s = build_workbook(ledger, job["start"], job["end"],
                                           f"{job['kind']}  ·  {job['label']}",
-                                          job["kind"] == "Daily", now)
+                                          job["kind"] == "Daily", now, view=view,
+                                          refresh_note=refresh_note)
             out.update(summary=s, tasks=len(tasks))
             _sc = scope_ledger(ledger, job["start"], job["end"])       # for the e-mail breakdown
             out["groups"] = [(meta["name"], gs) for _gk, meta, gs in _group_rows(_sc, _sc["tasks"])]
+            if view.get("enabled"):
+                rows = scorecard_rows(_sc, _sc["tasks"], view)
+                out["outcome_rows"] = rows
+                out["headline"] = headline(s, rows)
+                out["attention"] = outcome_totals(rows)["attention"]
             buf = io.BytesIO()                  # in memory only — never written to disk
             wb.save(buf)
             if upload:
                 out["link"] = upload(folders, name, buf)
+                # a delivered Daily report keeps its LIVE evening checks for the
+                # Weekly / Monthly reports (never a copy / "not checked" placeholders)
+                if job["kind"] == "Daily" and view.get("details_live") and view.get("details"):
+                    save_outcome_checks(job["end"], view["details"])
             buf.close()
         except Exception as exc:                                   # noqa: BLE001
             log.exception("Performance report %s %s failed: %s", job["kind"], job["label"], exc)
@@ -1619,11 +2421,109 @@ def run_jobs(jobs, versions, loader, now, upload=None):
               f"  Period tasks: {s['tasks']} | Completed: {s['completed']} | Pending: {s['pending']} "
               f"(open {s['open']}, missed {s['missed']}) | Completion {pct(s['completion_pct'])} | "
               f"Timely {pct(s['timely_pct'])} | Status {s['status']}\n"
-              f"  Folder: {out['folder']}\n"
+              + (f"  {out['headline']}\n" if out.get("headline") else "")
+              + f"  Folder: {out['folder']}\n"
               + (f"  [Drive] Uploaded: {out['link']}\n" if out.get("link") else
                  "  [Drive] upload OFF — built in memory only, nothing saved\n") + "=" * 70)
         results.append(out)
     return results
+
+
+# ── stored evening checks (Outcome Detail of earlier Daily performance reports) ──
+def discover_outcome_snapshots(drive, ranges) -> dict:
+    """{report day: latest Daily performance report file} for the days in
+    `ranges` — the files whose Outcome Detail tab holds that day's evening check."""
+    out = {}
+    for day, folder, x in _daily_folder_files(drive, ranges):
+        if not x.get("name", "").startswith(f"{REPORT_BASENAME}_Daily"):
+            continue
+        meta = {"id": x["id"], "name": x["name"], "day": day,
+                "created": _drive_time_ist(x.get("createdTime", "")),
+                "modified_raw": x.get("modifiedTime", "")}
+        cur = out.get(day)
+        if cur is None or (meta["created"] or datetime.min) > (cur["created"] or datetime.min):
+            out[day] = meta
+    return out
+
+
+def load_snapshot(drive, meta):
+    """Stored evening-check details of one Daily performance report (cached per
+    file revision). None when the report has no Outcome Detail tab."""
+    safe = re.sub(r"[^0-9A-Za-z]", "", meta["modified_raw"])
+    path = os.path.join(CACHE_DIR, f"outcome_{meta['id']}_{safe}.json")
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return None if data is None else [CO.detail_from_values(v) for v in data]
+        except Exception:                                        # corrupt cache -> refetch
+            pass
+    data = _call(lambda: drive.files().export(fileId=meta["id"], mimeType=XLSX_MIME).execute(),
+                 f"Drive: export {meta['name']}")
+    det = parse_outcome_detail(openpyxl.load_workbook(io.BytesIO(data), data_only=True))
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(None if det is None else [CO.detail_row_values(d) for d in det], fh)
+    except Exception as exc:                                     # cache is best-effort
+        log.warning("Could not write cache %s (%s).", path, exc)
+    return det
+
+
+def make_outcome_engine(drive, ranges, now):
+    """The OutcomeEngine for this run (Google sources + stored evening checks)."""
+    snaps = {}
+    try:
+        snaps = discover_outcome_snapshots(drive, ranges)
+    except Exception as exc:                                     # noqa: BLE001
+        log.warning("Could not list earlier Daily performance reports (%s) — earlier days' "
+                    "evening checks will show as not checked.", exc)
+
+    def _snapshot(day):
+        local = load_outcome_checks(day)
+        if local is not None:
+            return local
+        meta = snaps.get(day)                  # legacy: a Daily report's Outcome Detail tab
+        if meta is None:
+            return None
+        try:
+            return load_snapshot(drive, meta)
+        except Exception as exc:                                 # noqa: BLE001
+            log.warning("Stored evening check of %s unreadable (%s).", day, exc)
+            return None
+
+    import pyAssignmentSubmissionPerformanceReport as ASR
+    import pyAdmissionFormalitiesReport as ADM
+    try:
+        import pyWiseDataValidationReport as WISE
+    except Exception:                                            # pragma: no cover
+        WISE = None
+
+    def _keyfn(r):
+        g = next(x for x in TASK_GROUPS if x["key"] == "instructor")
+        vals = {"Tech Name": r["sess"].get("course_name", ""),
+                "Duration": r["sess"].get("course_title", ""),
+                "Instructor": r.get("instr", ""),
+                "Session Date": (r["actual_start_dt"].strftime("%Y-%m-%d %H:%M:%S")
+                                 if r.get("actual_start_dt") is not None
+                                 else str(r["sess"].get("start_time_ist", ""))[:19])}
+        return "|".join(_key_value(f, vals.get(f, "")) for f in g["identity"])
+
+    return CO.OutcomeEngine(BC, CO.GoogleOutcomeSources(BC, cache_dir=CACHE_DIR), now, snapshot=_snapshot,
+                            keyfn=_keyfn, ASR=ASR, ADM=ADM, WISE=WISE)
+
+
+def _refresh_note() -> str:
+    """The evening batch's source-refresh status (scripts/run_evening_reports.py)."""
+    raw = os.environ.get("INTELLIBI_EVENING_REFRESH", "").strip()
+    if not raw:
+        return ""
+    parts = [p.split("=", 1) for p in raw.split(";") if "=" in p]
+    bad = [n for n, st in parts if st.strip().upper() != "SUCCESS"]
+    if not bad:
+        return "all sources refreshed before the re-check."
+    return ("NOT refreshed: " + ", ".join(bad) + " — the re-check used the data from their last "
+            "successful run.")
 
 
 def cleanup_legacy_local_copies(root=None) -> int:
@@ -1673,7 +2573,15 @@ def generate():
     log.info("Planned %d report(s): %s", len(jobs),
              ", ".join(f"{j['kind']} {j['label']}" for j in jobs))
     drive = _drive_service()
-    versions = discover_report_versions(drive, [(j["start"], j["end"]) for j in jobs])
+    # each job's period + the previous period (Δ) + the trend days
+    ranges = job_ranges(jobs, now.date())
+    versions = discover_report_versions(drive, ranges)
+    engine = None
+    if CHECK_OUTCOMES:
+        try:
+            engine = make_outcome_engine(drive, ranges, now)
+        except (Exception, SystemExit) as exc:                     # noqa: BLE001 (a source module may sys.exit)
+            log.exception("Actual-performance checks unavailable (%s) — effort only.", exc)
 
     def _upload(folders, name, buf):
         # Same versioned, never-overwrite upload as the Batch Coordinator report,
@@ -1681,7 +2589,8 @@ def generate():
         return BC.upload_report(folders, name + ".xlsx", buf, name)
 
     results = run_jobs(jobs, versions, lambda v: load_version(drive, v), now,
-                       upload=_upload if UPLOAD_TO_DRIVE else None)
+                       upload=_upload if UPLOAD_TO_DRIVE else None, engine=engine,
+                       refresh_note=_refresh_note())
     email_results(results)
     return results, errors
 
@@ -1705,7 +2614,9 @@ def email_results(results) -> bool | None:
         body = CE.performance_html(kind, label, s, r.get("groups", []), r.get("link"),
                                    _fmt_hours(s["median_ttc"]), STATUS_ON_TRACK, STATUS_WATCH,
                                    benchmark=COMPLETION_BENCHMARK,
-                                   group_labels=EMAIL_GROUP_LABELS)
+                                   group_labels=EMAIL_GROUP_LABELS,
+                                   outcome_rows=r.get("outcome_rows"),
+                                   headline=r.get("headline"), attention=r.get("attention"))
         ok = CE.send(subject, body, EMAIL_RECIPIENTS, sender=EMAIL_SENDER,
                      star=STAR_EMAIL_IN_GMAIL) and ok
     return ok

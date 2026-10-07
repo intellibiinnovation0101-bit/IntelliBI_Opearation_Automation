@@ -33,6 +33,12 @@ The marker is `cache/scheduler/ops_evening_last_success.txt` and the lock is
 `ops_evening.lock`, so the morning and evening batches never block or skip each
 other. It e-mails its own summary, like the morning batch.
 
+Before the report, the evening batch refreshes the sources the report re-checks
+(admission signatures, Wise student data with its API cache capped at 30 minutes,
+assignment submissions). They appear as separate jobs in the evening summary; a
+failed refresh marks the batch "completed with issues" but the report still runs
+and says which source was not refreshed.
+
 ## One-time setup (on the target machine, after deployment)
 
 Open **PowerShell as Administrator**, `cd` into the project folder, and run:
@@ -89,6 +95,7 @@ Manual test without the scheduler:
 
 ## Change history
 - 2026-08-24 — Added scheduling (10:00 normal + 11:00/12:00 retry-until-success, once per day, overlap-protected) via `run_scheduled.py` + `setup_schedule.ps1`.
+- 2026-10-07 — Evening batch: source refresh (`pyZohoSignatureStatusRefresh`, `pyStudentPaymentClassesStudentEnrolled`, `pyAssignmentSubmissions`) before the Coordinator Task Performance report, for its Effort → Outcome checks. Times unchanged; no need to re-run `setup_schedule.ps1`.
 - 2026-10-01 — Added the Batch Coordinator report to the morning batch (Layer 2) and the evening batch (19:00 + 20:00 retry, `run_evening_reports.py`, Coordinator Task Performance report); `run_scheduled.py` gained `--entry`. Re-run `setup_schedule.ps1` as Administrator to apply.
 - 2026-10-05 — Morning batch (`scripts/run_reports_action.py`): `pyAssignmentSubmissionsReport.py` removed and retired to `archive/`; `pyAssignmentSubmissionPerformanceReport.py` runs every day in its place (after the Assignment Submissions refresh). Schedule, retry and other jobs unchanged.
 - 2026-10-01 — The Batch Coordinator report script was renamed `pyCoordinatorTaskListReport.py` (formerly `pyBatchCoordinatorDailyAttendanceReport.py`). The morning-batch job runs it under the same label "Batch Coordinator Daily Report". No Task Scheduler change: the tasks call `run_scheduled.py`, not the script.

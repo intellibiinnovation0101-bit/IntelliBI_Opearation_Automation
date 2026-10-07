@@ -189,7 +189,8 @@ check("coverage day 1: versions / dropped / multi-version / no-time / Yes-No con
 # the workbook builds end-to-end for both a day and a multi-day period
 wb, tasks, summ = P.build_workbook(ledger, D1, D2, "Test", False, now)
 check("workbook tabs", wb.sheetnames,
-      ["Dashboard", "Progress Trend", "Task Register", "Data Coverage & Rules"])
+      ["Dashboard", "Effort vs Outcome Trend", "Progress Trend", "Task Register",
+       "Data Coverage & Rules"])
 wb, tasks, summ = P.build_workbook(ledger, D2, D2, "Test", True, now)
 check("daily workbook task count", len(tasks), 4)
 

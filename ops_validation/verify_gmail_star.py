@@ -259,6 +259,8 @@ P.load_version = lambda drive, v: parsed
 P._now_ist = lambda: datetime(2026, 10, 5, 19, 0)
 P.BC.upload_report = lambda folders, filename, b, base: f"https://docs.google.com/spreadsheets/d/{base}"
 P.LEGACY_OUTPUT_DIR = os.path.join(HERE, "__no_such_dir__")
+import tempfile as _tf                                       # noqa: E402
+P.OUTCOME_CHECKS_DIR = _tf.mkdtemp(prefix="outcome_checks_")   # never the real evening-check store
 P.GENERATE_AUTO = True
 P.SEND_EMAIL = True
 

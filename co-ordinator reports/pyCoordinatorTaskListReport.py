@@ -1250,6 +1250,150 @@ def _why_flagged_richtext(reasons):
         return "\n".join("• " + "".join(t for t, _ in runs) for runs in reasons)
 
 
+def _dedup_fb(sub):
+    if sub is None or sub.empty:
+        return sub
+    cols = [c for c in ["session_id", "student_id"] if c in sub.columns]
+    return sub.drop_duplicates(subset=cols) if cols else sub
+
+
+# Human labels of the instructor follow-up reason codes (Why Flagged).
+INSTR_REASON_LABELS = {
+    "cancelled": "Session cancelled",
+    "started_late": "Started late",
+    "not_early": "Not started 5 min early",
+    "underrun": "Session underrun (>= 30 min short)",
+    "feedback_missing": "Instructor feedback missing",
+    "low_feedback_rate": "Low student feedback rate",
+}
+
+
+def review_instructor_session(sess, att_daily, fb_daily, tf_ids, instr_phones=None):
+    """THE per-session instructor review behind the Instructor Follow-Ups tab (and
+    the Coordinator performance report's Instructor outcome). Returns a dict with
+    the session's metrics, its type (AR._classify_session_type), `reasons` (the
+    Why-Flagged runs) and `codes` (one reason id per reason, INSTR_REASON_LABELS).
+    A session is a follow-up when `reasons` is non-empty."""
+    instr_phones = instr_phones or {}
+    sid = sess.get("session_id", "")
+    sa = (att_daily[att_daily["session_id"] == sid]
+          if (att_daily is not None and not att_daily.empty) else pd.DataFrame())
+    sa_app = AR._applicable(sa) if not sa.empty else sa
+    na_cnt = AR._na_count(sa) if not sa.empty else 0
+    present = sa_app[sa_app["status"] == "Present"] if not sa_app.empty else sa_app
+    n_present = len(present)
+    total_enrolled = len(sa)
+    absent_n = len(sa_app) - n_present
+    att_pct = round(n_present / len(sa_app) * 100, 1) if len(sa_app) else 0.0
+
+    # TRUE actual conducted start/end/duration (never the scheduled slot)
+    actual_start_dt, actual_end_dt, dur_min = _actual_session_times(sess, sa)
+    dur_min = dur_min or 0.0
+    avg_time = (round(present["_dur_min"].mean() / dur_min * 100, 1)
+                if (dur_min > 0 and n_present > 0) else 0.0)
+
+    sched_min = _scheduled_min(sess)
+    diff_min = round(dur_min - sched_min, 1) if (sched_min is not None) else None
+
+    sf = (_dedup_fb(fb_daily[fb_daily["session_id"] == sid])
+          if (fb_daily is not None and not fb_daily.empty) else pd.DataFrame())
+    n_fb = len(sf) if sf is not None else 0
+    fb_rt = round(n_fb / n_present * 100, 1) if n_present else 0.0
+    ratings = (sf["_rating"].dropna().tolist()
+               if (n_fb and sf is not None and "_rating" in sf.columns) else [])
+    avg_r = round(sum(ratings) / len(ratings), 2) if ratings else None
+    min_r = int(min(ratings)) if ratings else None
+    max_r = int(max(ratings)) if ratings else None
+    fb_given = sid in tf_ids
+    instr = str(sess.get("tutor_name", ""))
+    phone = instr_phones.get(_norm_name(instr), "")
+
+    # ── instructor follow-up conditions ──────────────────────────────────
+    # Session type reuses AR's exact cancelled/scheduled classifier.
+    _end_raw = str(sess.get("end_time_ist", "")).strip()
+    _end_blank = _end_raw in ("", "nan", "NaT", "None", "NAN")
+    _sess_type = AR._classify_session_type(
+        len(sa) > 0, dur_min > 0, _end_blank, str(sess.get("start_time_ist", "")).strip())
+
+    sched_start_dt = _parse_dt(sess.get("Session Scheduled Start", ""))
+    # actual_start_dt already resolved to the TRUE actual by _actual_session_times
+
+    # reasons: list of reason-run-lists → [(text, is_red), …]; is_red = key figure
+    reasons = []
+    codes = []      # machine-readable reason ids, one per reason (same order)
+    if _sess_type == "cancelled":
+        # 3. Session Cancelled — coordinator may be unaware
+        codes.append("cancelled")
+        reasons.append([("Session Cancelled", True),
+                        (" — Coordinator may be unaware; confirm with the instructor.", False)])
+    elif _sess_type == "scheduled":
+        pass                                   # not yet conducted → not a follow-up
+    else:
+        # 1 & 2. Start-time checks (need both scheduled & actual start)
+        if sched_start_dt is not None and actual_start_dt is not None:
+            late_min = round((actual_start_dt - sched_start_dt).total_seconds() / 60.0)
+            sched_txt, actual_txt = _fmt_clock(sched_start_dt), _fmt_clock(actual_start_dt)
+            if late_min > 0:
+                # 2. Session Not Started On Time → Coordinator Call
+                codes.append("started_late")
+                reasons.append([("Started Late: Scheduled ", False), (sched_txt, True),
+                                (", Actual ", False), (actual_txt, True),
+                                (" (", False), (f"{late_min} min late", True),
+                                (") — Call Instructor", False)])
+            elif late_min > -INSTR_EARLY_MIN:
+                # 1. Session Not Started 5 Mins Prior → Coordinator Message
+                exp_txt = _fmt_clock(sched_start_dt - timedelta(minutes=INSTR_EARLY_MIN))
+                var_min = int(round(INSTR_EARLY_MIN + late_min))   # min after expected early start
+                codes.append("not_early")
+                reasons.append([("Not Started 5 Min Early: Scheduled ", False), (sched_txt, True),
+                                (f", expected by {exp_txt}", True),
+                                (", Actual ", False), (actual_txt, True),
+                                (" (", False), (f"{var_min} min late vs expected", True),
+                                (") — Message Instructor", False)])
+        # 4. Session Underrun (Diff Mins <= -30) → Coordinator Call
+        if diff_min is not None and diff_min <= -INSTR_UNDERRUN_MIN:
+            under = abs(int(round(diff_min)))
+            codes.append("underrun")
+            reasons.append([("Session Underrun: Scheduled ", False), (f"{sched_min:.0f} min", True),
+                            (", Actual ", False), (f"{dur_min:.0f} min", True),
+                            (" (", False), (f"{under} min short", True),
+                            (") — Call Instructor", False)])
+        # 5. Instructor Feedback Missing → Coordinator Message
+        if not fb_given:
+            codes.append("feedback_missing")
+            reasons.append([("Feedback Missing", True),
+                            (" — instructor feedback for this session is pending. Message Instructor.", False)])
+        # 6. Low Feedback Rate (student feedback participation <= 25%) →
+        #    Coordinator asks students to submit their feedback. Combined into
+        #    this session's existing reasons (never a duplicate record).
+        if n_present > 0 and fb_rt <= INSTR_LOW_FB_RATE_PCT:
+            codes.append("low_feedback_rate")
+            reasons.append([("Low Feedback Rate", True), (": Only ", False),
+                            (f"{n_fb} of {n_present}", True),
+                            (" students submitted feedback (", False),
+                            (f"{fb_rt:g}%", True), (") — ", False),
+                            ("Ask students to submit their feedback.", True)])
+    return {"sid": sid, "sess": sess, "type": _sess_type, "reasons": reasons, "codes": codes,
+            "sa": sa, "na_cnt": na_cnt, "n_present": n_present, "total_enrolled": total_enrolled,
+            "absent_n": absent_n, "att_pct": att_pct, "actual_start_dt": actual_start_dt,
+            "dur_min": dur_min, "avg_time": avg_time, "sched_min": sched_min, "diff_min": diff_min,
+            "n_fb": n_fb, "fb_rt": fb_rt, "avg_r": avg_r, "min_r": min_r, "max_r": max_r,
+            "fb_given": fb_given, "instr": instr, "phone": phone}
+
+
+def review_instructor_sessions(sess_daily, att_daily, fb_daily, tf_daily):
+    """Review every session of the window (same ordering/instructor-name rules as
+    the Instructor Follow-Ups tab). Returns a list of review_instructor_session dicts."""
+    if sess_daily is None or sess_daily.empty:
+        return []
+    sess_f = AR._prefer_instructor_name(sess_daily)
+    tf_ids = AR.teacher_feedback_session_ids(tf_daily)
+    _order = sess_f.sort_values(["course_name", "course_title", "start_time_ist"],
+                                na_position="last")
+    return [review_instructor_session(sess, att_daily, fb_daily, tf_ids)
+            for _, sess in _order.iterrows()]
+
+
 def build_instructor_followups(ws, sess_daily, att_daily, fb_daily, tf_daily,
                                instr_phones, report_date, period_label=None):
     """Per-SESSION instructor follow-up action list. A session is listed only when
@@ -1292,110 +1436,21 @@ def build_instructor_followups(ws, sess_daily, att_daily, fb_daily, tf_daily,
     # AR Teacher_No_Feedback tab); a completion-only placeholder row does not count.
     tf_ids = AR.teacher_feedback_session_ids(tf_daily)
 
-    def _dedup_fb(sub):
-        if sub is None or sub.empty:
-            return sub
-        cols = [c for c in ["session_id", "student_id"] if c in sub.columns]
-        return sub.drop_duplicates(subset=cols) if cols else sub
-
     any_rendered = False
     n_rows = 0
     _order = sess_f.sort_values(["course_name", "course_title", "start_time_ist"],
                                 na_position="last")
     for _, sess in _order.iterrows():
-        sid = sess.get("session_id", "")
-        sa = (att_daily[att_daily["session_id"] == sid]
-              if (att_daily is not None and not att_daily.empty) else pd.DataFrame())
-        sa_app = AR._applicable(sa) if not sa.empty else sa
-        na_cnt = AR._na_count(sa) if not sa.empty else 0
-        present = sa_app[sa_app["status"] == "Present"] if not sa_app.empty else sa_app
-        n_present = len(present)
-        total_enrolled = len(sa)
-        absent_n = len(sa_app) - n_present
-        att_pct = round(n_present / len(sa_app) * 100, 1) if len(sa_app) else 0.0
-
-        # TRUE actual conducted start/end/duration (never the scheduled slot)
-        actual_start_dt, actual_end_dt, dur_min = _actual_session_times(sess, sa)
-        dur_min = dur_min or 0.0
-        avg_time = (round(present["_dur_min"].mean() / dur_min * 100, 1)
-                    if (dur_min > 0 and n_present > 0) else 0.0)
-
-        sched_min = _scheduled_min(sess)
-        diff_min = round(dur_min - sched_min, 1) if (sched_min is not None) else None
-
-        sf = (_dedup_fb(fb_daily[fb_daily["session_id"] == sid])
-              if (fb_daily is not None and not fb_daily.empty) else pd.DataFrame())
-        n_fb = len(sf) if sf is not None else 0
-        fb_rt = round(n_fb / n_present * 100, 1) if n_present else 0.0
-        ratings = (sf["_rating"].dropna().tolist()
-                   if (n_fb and sf is not None and "_rating" in sf.columns) else [])
-        avg_r = round(sum(ratings) / len(ratings), 2) if ratings else None
-        min_r = int(min(ratings)) if ratings else None
-        max_r = int(max(ratings)) if ratings else None
-        fb_given = sid in tf_ids
-        instr = str(sess.get("tutor_name", ""))
-        phone = instr_phones.get(_norm_name(instr), "")
-
-        # ── instructor follow-up conditions ──────────────────────────────────
-        # Session type reuses AR's exact cancelled/scheduled classifier.
-        _end_raw = str(sess.get("end_time_ist", "")).strip()
-        _end_blank = _end_raw in ("", "nan", "NaT", "None", "NAN")
-        _sess_type = AR._classify_session_type(
-            len(sa) > 0, dur_min > 0, _end_blank, str(sess.get("start_time_ist", "")).strip())
-
-        sched_start_dt = _parse_dt(sess.get("Session Scheduled Start", ""))
-        # actual_start_dt already resolved to the TRUE actual by _actual_session_times
-
-        # reasons: list of reason-run-lists → [(text, is_red), …]; is_red = key figure
-        reasons = []
-        if _sess_type == "cancelled":
-            # 3. Session Cancelled — coordinator may be unaware
-            reasons.append([("Session Cancelled", True),
-                            (" — Coordinator may be unaware; confirm with the instructor.", False)])
-        elif _sess_type == "scheduled":
-            pass                                   # not yet conducted → not a follow-up
-        else:
-            # 1 & 2. Start-time checks (need both scheduled & actual start)
-            if sched_start_dt is not None and actual_start_dt is not None:
-                late_min = round((actual_start_dt - sched_start_dt).total_seconds() / 60.0)
-                sched_txt, actual_txt = _fmt_clock(sched_start_dt), _fmt_clock(actual_start_dt)
-                if late_min > 0:
-                    # 2. Session Not Started On Time → Coordinator Call
-                    reasons.append([("Started Late: Scheduled ", False), (sched_txt, True),
-                                    (", Actual ", False), (actual_txt, True),
-                                    (" (", False), (f"{late_min} min late", True),
-                                    (") — Call Instructor", False)])
-                elif late_min > -INSTR_EARLY_MIN:
-                    # 1. Session Not Started 5 Mins Prior → Coordinator Message
-                    exp_txt = _fmt_clock(sched_start_dt - timedelta(minutes=INSTR_EARLY_MIN))
-                    var_min = int(round(INSTR_EARLY_MIN + late_min))   # min after expected early start
-                    reasons.append([("Not Started 5 Min Early: Scheduled ", False), (sched_txt, True),
-                                    (f", expected by {exp_txt}", True),
-                                    (", Actual ", False), (actual_txt, True),
-                                    (" (", False), (f"{var_min} min late vs expected", True),
-                                    (") — Message Instructor", False)])
-            # 4. Session Underrun (Diff Mins <= -30) → Coordinator Call
-            if diff_min is not None and diff_min <= -INSTR_UNDERRUN_MIN:
-                under = abs(int(round(diff_min)))
-                reasons.append([("Session Underrun: Scheduled ", False), (f"{sched_min:.0f} min", True),
-                                (", Actual ", False), (f"{dur_min:.0f} min", True),
-                                (" (", False), (f"{under} min short", True),
-                                (") — Call Instructor", False)])
-            # 5. Instructor Feedback Missing → Coordinator Message
-            if not fb_given:
-                reasons.append([("Feedback Missing", True),
-                                (" — instructor feedback for this session is pending. Message Instructor.", False)])
-            # 6. Low Feedback Rate (student feedback participation <= 25%) →
-            #    Coordinator asks students to submit their feedback. Combined into
-            #    this session's existing reasons (never a duplicate record).
-            if n_present > 0 and fb_rt <= INSTR_LOW_FB_RATE_PCT:
-                reasons.append([("Low Feedback Rate", True), (": Only ", False),
-                                (f"{n_fb} of {n_present}", True),
-                                (" students submitted feedback (", False),
-                                (f"{fb_rt:g}%", True), (") — ", False),
-                                ("Ask students to submit their feedback.", True)])
+        r = review_instructor_session(sess, att_daily, fb_daily, tf_ids, instr_phones)
+        reasons = r["reasons"]
         if not reasons:
             continue
+        (sa, na_cnt, n_present, total_enrolled, absent_n, att_pct, actual_start_dt,
+         dur_min, avg_time, sched_min, diff_min, n_fb, fb_rt, avg_r, min_r, max_r,
+         fb_given, instr, phone) = (r[k] for k in (
+            "sa", "na_cnt", "n_present", "total_enrolled", "absent_n", "att_pct",
+            "actual_start_dt", "dur_min", "avg_time", "sched_min", "diff_min", "n_fb",
+            "fb_rt", "avg_r", "min_r", "max_r", "fb_given", "instr", "phone"))
 
         # ── render ───────────────────────────────────────────────────────────
         # Priority = the escalation the reasons themselves ask for: a "Call"
@@ -1845,12 +1900,16 @@ _WISE_CRS_FIELDS = [
 ]
 
 
-def load_wise_validation():
+def load_wise_validation(return_sources=False):
     """Return {'student':[...], 'course':[...], 'instructor':[...]} — the failed /
     attention-required validation records, produced by pyWiseDataValidationReport's
     OWN logic end-to-end (identical to its standalone run). Returns None on any
     failure so the tab shows an 'unavailable' banner and the rest of the report is
-    unaffected. No validation rule is changed here."""
+    unaffected. No validation rule is changed here.
+    return_sources=True also returns the source rows the records were validated
+    from under '_sources' ({'student', 'combined', 'instructor'}) — used by the
+    Coordinator performance report's evening re-check to tell a FIXED record from
+    one that is no longer applicable (deleted / inactive)."""
     try:
         import pyWiseDataValidationReport as WISE   # bootstrap already on sys.path
     except Exception as e:                          # pragma: no cover
@@ -1878,7 +1937,11 @@ def load_wise_validation():
         instructor_rows, _it = WISE.build_instructor_rows(instructor_src, onb_pool)
         log.info("Wise validation: %d student, %d course, %d instructor flagged record(s).",
                  len(student_rows), len(course_rows), len(instructor_rows))
-        return {"student": student_rows, "course": course_rows, "instructor": instructor_rows}
+        out = {"student": student_rows, "course": course_rows, "instructor": instructor_rows}
+        if return_sources:
+            out["_sources"] = {"student": student_src, "combined": combined_src,
+                               "instructor": instructor_src}
+        return out
     except Exception as e:                          # pragma: no cover
         log.warning("Could not compute Wise validation (%s).", e)
         return None
