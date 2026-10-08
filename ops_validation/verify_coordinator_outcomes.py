@@ -19,6 +19,9 @@ Synthetic data only — no Google access, no real learner data. Checks:
                    the Weekly report (Weekly = sum of its Dailies), Dashboard /
                    e-mail figures reconcile, quadrants, headline, six questions
   8. Evening batch: source refresh before the report, cache cap
+  9. Yesterday → Today (Attendance / Assignment / Instructor): labels by actual
+                   dates, measurement windows, availability, Follow-up → Result,
+                   Dashboard block + charts, trend data, e-mail cards
 """
 import io
 import os
@@ -502,11 +505,19 @@ check("Daily actuals: admission 75%, wise 77.8%, instructor 80%",
 dash = wb0["Dashboard"]
 sc = {r[0]: r for r in dash.iter_rows(values_only=True) if r and r[0] in
       [g["name"] for g in P.TASK_GROUPS]}
+_card = {k: r for k, r in rows0.items() if k not in P.COMPARE_GROUPS}
+check("Dashboard scorecard: the Yesterday → Today groups are not repeated; the others stay, in order",
+      [n for n in sc], [g["name"] for g in P.TASK_GROUPS if g["key"] not in P.COMPARE_GROUPS])
 check("Dashboard Actual Performance % == the outcome figures",
-      {k: sc[r["name"]][7] for k, r in rows0.items()},
-      {k: (round(r["actual"], 1) if r["actual"] is not None else "—") for k, r in rows0.items()})
+      {k: sc[r["name"]][7] for k, r in _card.items()},
+      {k: (round(r["actual"], 1) if r["actual"] is not None else "—") for k, r in _card.items()})
 check("Dashboard Target column == OUTCOME_TARGETS",
-      {k: sc[r["name"]][8] for k, r in rows0.items()}, P.OUTCOME_TARGETS)
+      {k: sc[r["name"]][8] for k, r in _card.items()},
+      {k: v for k, v in P.OUTCOME_TARGETS.items() if k not in P.COMPARE_GROUPS})
+_tot0 = [r for r in dash.iter_rows(values_only=True) if r and r[0] == "All task groups"][0]
+check("… the total row still covers EVERY group (13 tasks, 0 done) and says so",
+      (_tot0[1], _tot0[2], _tot0[10]),
+      (13, 0, "Incl. the 3 follow-up groups below · Actual % = simple average"))
 cells = [str(c.value) for row in dash.iter_rows() for c in row if c.value is not None]
 check("headline: 'Coordinator completed X% of required actions — actual result …'",
       any(c.startswith("Coordinator completed 0.0% of required actions (0 of 13) — actual result:")
@@ -565,8 +576,10 @@ check("dry run (no upload) stores nothing new", sorted(os.listdir(P.OUTCOME_CHEC
 tr = wbw["Effort vs Outcome Trend"]
 texts = [str(c.value) for row in tr.iter_rows() for c in row if c.value is not None]
 _secs = [t.strip() for t in texts if t.strip().isupper() and "DAY BY DAY" in t or "PREVIOUS PERIOD" in t]
-check("trend tab: only OVERALL — DAY BY DAY and its chart", _secs,
+check("trend tab: only OVERALL — DAY BY DAY and its chart (no follow-up groups table)", _secs,
       ["OVERALL — DAY BY DAY", "TASK COMPLETION % VS AVERAGE ACTUAL % — DAY BY DAY"])
+check("… nothing below the chart (no leftover rows / follow-up table)",
+      [str(c) for c in texts if "FOLLOW-UP" in str(c).upper()], [])
 _th = [r for r in tr.iter_rows(values_only=True) if r and r[0] == "Day"][0]
 check("… table columns ('Areas On Target' removed)", [h for h in _th if h],
       ["Day", "Tasks Generated", "Tasks Completed", "Task Completion %", "Areas Measured", "Average Actual %"])
@@ -601,8 +614,9 @@ _tot = [r for r in _dw.iter_rows(values_only=True) if r and r[0] == "All task gr
 _avg = P.outcome_totals(rw2["outcome_rows"])["avg_actual"]   # wbw = the last upload (rw2)
 check("Dashboard: 'Average Actual %' tile = scorecard total = average of the measured areas",
       (_dw.cell(row=_tile[0] + 1, column=_tile[1]).value, _tot[7]), (_avg, _avg))
-check("Dashboard: one chart (Effort vs Actual Outcome), read from the scorecard columns E and H",
-      (len(_dw._charts), [x.val.numRef.f.split("!")[1][:2] for x in _dw._charts[0].series]), (1, ["$E", "$H"]))
+check("Dashboard: Effort vs Actual Outcome chart still reads the scorecard columns E and H",
+      [x.val.numRef.f.split("!")[1][:2] for x in _dw._charts[0].series], ["$E", "$H"])
+check("… plus the previous-vs-current chart beside it (2 charts)", len(_dw._charts), 2)
 
 # effort-only fallback still works (CHECK_OUTCOMES off / engine unavailable)
 r_off = P.run_jobs(jobs0, versions[:1], loader, now0, upload=upload, engine=None)[0]
@@ -630,6 +644,160 @@ check("collector cache cap: students 12h -> 30 min; participant identities keep 
       (ns["_effective_ttl"]("sp_students", 43200), ns["_effective_ttl"]("sp_participant", 86400)), (1800, 86400))
 del os.environ["INTELLIBI_CACHE_MAX_AGE_SECONDS"]
 check("… unset -> normal TTL", ns["_effective_ttl"]("sp_students", 43200), 43200)
+
+# =============================================================================
+print("\n== 9. Previous vs current period (Yesterday → Today) for the follow-up groups ==")
+# pure rules
+check("verdicts: up after high effort / down despite high effort / down with low effort / steady / n.a.",
+      [CO.followup_result(100, 5.0), CO.followup_result(80, -21.0), CO.followup_result(40, -3.0),
+       CO.followup_result(100, 0.6), CO.followup_result(None, 4.0), CO.followup_result(None, -4.0),
+       CO.followup_result(60, 2.0), CO.followup_result(100, None)],
+      [CO.FR_IMPROVED_AFTER, CO.FR_DECLINED_DESPITE, CO.FR_DECLINED_INCOMPLETE, CO.FR_STEADY,
+       CO.FR_IMPROVED_NO_TASKS, CO.FR_DECLINED_NO_TASKS, CO.FR_IMPROVED, CO.FR_NA])
+_cut = lambda d: datetime.combine(d, datetime.min.time()) + timedelta(hours=9, minutes=12)
+check("Daily windows: attendance / instructor = yesterday 12:00 PM → task-list time; assignment = due D-1",
+      [CO.measurement_window(g, "Daily", date(2026, 10, 8), date(2026, 10, 8), _cut)["text"]
+       for g in ("attendance", "instructor", "assignment")],
+      ["sessions 07-Oct 12:00 PM – 08-Oct 09:12 AM", "sessions 07-Oct 12:00 PM – 08-Oct 09:12 AM",
+       "assignments due 07-Oct (Assignment Daily 07-Oct)"])
+check("period windows: the period's own sessions / deadlines",
+      [CO.measurement_window(g, "Weekly", date(2026, 9, 28), date(2026, 10, 4))["text"]
+       for g in ("attendance", "assignment")],
+      ["sessions dated 28-Sep – 04-Oct", "assignments due 28-Sep – 04-Oct"])
+_n8 = datetime(2026, 10, 8, 19, 5)
+_lab = lambda k, s, e, n=_n8: P.compare_labels(k, s, e, *P.previous_period(k, s, e), n)
+check("labels by actual reporting dates (never the generation time)",
+      [tuple(_lab("Daily", date(2026, 10, 8), date(2026, 10, 8))[k] for k in ("prev_tag", "cur_tag", "prev_dates", "cur_dates", "as_of", "observation")),
+       ],
+      [("Yesterday", "Today", "Wed 07-Oct-2026", "Thu 08-Oct-2026", "07:05 PM", "next_day")])
+check("pinned past Daily -> 'Previous Day' / 'Report Day', no 'as of'",
+      tuple(_lab("Daily", date(2026, 10, 2), date(2026, 10, 2))[k] for k in ("prev_tag", "cur_tag", "prev_dates", "as_of")),
+      ("Previous Day", "Report Day", "Thu 01-Oct-2026", ""))
+check("Weekly / Monthly / Manual -> previous period vs report period (same-period comparison)",
+      [(_lab(k, s, e)["prev_tag"], _lab(k, s, e)["prev_dates"], _lab(k, s, e)["cur_dates"], _lab(k, s, e)["observation"])
+       for k, s, e in (("Weekly", date(2026, 9, 28), date(2026, 10, 4)),
+                       ("Monthly", date(2026, 9, 1), date(2026, 9, 30)),
+                       ("Manual", date(2026, 9, 21), date(2026, 9, 25)))],
+      [("Previous Week", "21-Sep – 27-Sep-2026", "28-Sep – 04-Oct-2026", "same_period"),
+       ("Previous Month", "Aug-2026", "Sep-2026", "same_period"),
+       ("Previous Period", "16-Sep – 20-Sep-2026", "21-Sep – 25-Sep-2026", "same_period")])
+_o = lambda **kw: dict({"key": "attendance", "state": CO.ST_MEASURED, "pct": 70.0, "note": ""}, **kw)
+check("availability: final / provisional / not available / nothing / period still running",
+      [P.outcome_availability(_o(), "Daily", date(2026, 10, 8), date(2026, 10, 8))[0],
+       P.outcome_availability(_o(source="provisional"), "Daily", date(2026, 10, 8), date(2026, 10, 8))[0],
+       P.outcome_availability(_o(state=CO.ST_NOT_CHECKED, pct=None), "Daily", date(2026, 10, 8), date(2026, 10, 8))[0],
+       P.outcome_availability(_o(state=CO.ST_NO_DATA, pct=None), "Daily", date(2026, 10, 8), date(2026, 10, 8))[0],
+       P.outcome_availability(_o(), "Weekly", date(2026, 10, 11), date(2026, 10, 8))[0],
+       P.outcome_availability(_o(), "Weekly", date(2026, 10, 4), date(2026, 10, 8))[0]],
+      ["Final", "Provisional", "Not available", "Nothing to measure", "In progress", "Final"])
+# the business example (illustrative figures): 72/72 → 71.6 %, 20/20 → 50.6 %
+_s = lambda d, n: {"tasks": n, "completed": d, "completion_pct": d / n * 100 if n else None}
+_v = {"enabled": True, "kind": "Daily", "now": _n8,
+      "compare": _lab("Daily", date(2026, 10, 8), date(2026, 10, 8))}
+_ex = P.compare_row("assignment", _s(20, 20), _o(key="assignment", pct=50.6), _s(72, 72),
+                    _o(key="assignment", pct=71.6), _v, _n8)
+check("example: Yesterday 72/72 · 71.6 % → Today 20/20 · 50.6 % = ▼ 21.0 pts, declined despite follow-ups",
+      (_ex["prev_comp"], _ex["prev_actual"], _ex["cur_comp"], _ex["cur_actual"], _ex["change"], _ex["verdict"]),
+      (100.0, 71.6, 100.0, 50.6, -21.0, CO.FR_DECLINED_DESPITE))
+_na = P.compare_row("assignment", _s(20, 20), _o(key="assignment", state=CO.ST_NOT_CHECKED, pct=None,
+                    note="Assignment report unreadable"), _s(72, 72), _o(key="assignment", pct=71.6), _v, _n8)
+check("today's outcome not available -> status, no change, no verdict guessed",
+      (_na["cur_actual"], _na["change"], _na["verdict"], _na["why"]),
+      (None, None, CO.FR_NA, "Today's outcome: Not available — Assignment report unreadable"))
+
+# end to end (Tuesday 06-Oct Daily, Monday as yesterday)
+_cr = {r["gk"]: r for r in r1["outcome_rows"]}
+check("only the three follow-up groups carry a comparison",
+      sorted(k for k, r in _cr.items() if r.get("compare")), ["assignment", "attendance", "instructor"])
+check("Daily labels: Yesterday (Mon 05-Oct) → Today (Tue 06-Oct), as of the run time",
+      tuple(r1["compare"][k] for k in ("prev_tag", "prev_dates", "cur_tag", "cur_dates", "as_of")),
+      ("Yesterday", "Mon 05-Oct-2026", "Today", "Tue 06-Oct-2026", "07:00 PM"))
+_ic = _cr["instructor"]["compare"]
+check("instructor: same figures as the report's own period outcomes and Δ (80 % → 80 %, 0 pts, Steady)",
+      (_ic["prev_actual"], _ic["cur_actual"], _ic["change"], _cr["instructor"]["d_actual"], _ic["verdict"]),
+      (80.0, 80.0, 0.0, 0.0, CO.FR_STEADY))
+check("windows are aligned: today's starts at yesterday 12:00 PM, after yesterday's 10:30 AM list",
+      (_ic["prev_window"], _ic["cur_window"]),
+      ("sessions 04-Oct 12:00 PM – 05-Oct 10:30 AM", "sessions 05-Oct 12:00 PM – 06-Oct 10:30 AM"))
+_ac = _cr["assignment"]["compare"]
+check("assignment: today provisional (report not generated), yesterday nothing to measure -> not comparable",
+      (_ac["cur_av"][0], _ac["prev_av"][0], _ac["verdict"]), ("Provisional", "Nothing to measure", CO.FR_NA))
+_d1 = openpyxl.load_workbook(io.BytesIO(UP[r1["name"]]))
+_dd = _d1["Dashboard"]
+_dvals = [[c.value for c in row] for row in _dd.iter_rows()]
+_sec = [v[0].strip() for v in _dvals if v and isinstance(v[0], str) and "FOLLOW-UP GROUPS: COORDINATOR EFFORT" in v[0]]
+_si = lambda txt: [i for i, v in enumerate(_dvals) if v and isinstance(v[0], str) and v[0].strip() == txt][0]
+check("Dashboard: Yesterday → Today block inside the scorecard section, before the charts",
+      (len(_sec), _sec[0].startswith("YESTERDAY  →  TODAY") if _sec else None,
+       _si("TASK GROUP SCORECARD") < _si(_sec[0]) < _si("EFFORT VS OUTCOME BY TASK GROUP")),
+      (1, True, True))
+_hi = [i for i, v in enumerate(_dvals) if v and v[0] == "Task Group  ·  Outcome Measure"][0]
+check("… super-headers carry the actual dates", [_dvals[_hi - 1][c] for c in (1, 4, 7)],
+      ["YESTERDAY  ·  Mon 05-Oct-2026", "TODAY  ·  Tue 06-Oct-2026  ·  as of 07:00 PM",
+       "CHANGE  ·  FOLLOW-UP → RESULT"])
+_brow = {str(v[0]).split("\n")[0]: (v, _hi + 1 + k) for k, v in enumerate(_dvals[_hi + 1:_hi + 4])}
+_inst, _irow = _brow["Instructor Follow-Ups"]
+check("… instructor row: Yesterday 0/5 · 0 % · 80 % | Today 0/5 · 0 % · 80 % | ● 0.0 | Steady",
+      (_inst[1], _inst[3], _inst[4], _inst[6], _inst[7], _inst[10]),
+      (_inst[1], 80.0, _inst[4], 80.0, 0.0, CO.FR_STEADY))
+_asg, _arow = _brow["Learner Assignment Follow-Ups"]
+check("… a figure that is not final is labelled: today provisional ('% · prov.'), yesterday shown as its status",
+      (_dd.cell(row=_arow + 1, column=7).number_format, _asg[3]), ('0.0"% · prov."', "Nothing to measure"))
+check("… change cells use ▲ / ▼ / ● formatting", _dd.cell(row=_irow + 1, column=8).number_format, P.CHANGE_FMT)
+_ch = _dd._charts
+_bf, _bl = _hi + 2, _hi + 4                      # the block's 3 data rows (1-based)
+check("Dashboard: compare chart = 4 series (prev effort, prev outcome, cur effort, cur outcome) "
+      "read from the Dashboard's own Yesterday → Today block (C, D, F, G)",
+      ([s.tx.v for s in _ch[1].series], [s.val.numRef.f.split("!")[1] for s in _ch[1].series],
+       all(s.val.numRef.f.startswith("'Dashboard'!") or s.val.numRef.f.startswith("Dashboard!")
+           for s in _ch[1].series)),
+      (["Yesterday · Effort", "Yesterday · Outcome", "Today · Effort", "Today · Outcome"],
+       [f"${c}${_bf}:${c}${_bl}" for c in "CDFG"], True))
+_lc0 = _ch[0]
+_cats = _lc0.series[0].cat.numRef.f if _lc0.series[0].cat.numRef is not None else _lc0.series[0].cat.strRef.f
+_r0, _r1 = [int(x.split("$")[-1]) for x in _cats.split("!")[1].split(":")]
+check("left chart = only the scorecard's remaining groups (no blank categories), titled accordingly",
+      ([_dd.cell(row=r, column=1).value for r in range(_r0, _r1 + 1)],
+       _lc0.title.tx.rich.p[0].r[0].t if _lc0.title and _lc0.title.tx and _lc0.title.tx.rich else None),
+      (["Learner Admission Formalities", "Wise & Interview Feedback Validation",
+        "Learner Instructor Interview Reminder"], "Other task groups · Today"))
+check("both charts share one height (no ragged blank space)", _ch[0].height == _ch[1].height, True)
+_eo = openpyxl.load_workbook(io.BytesIO(UP[r_off["name"]]))["Dashboard"]
+check("effort-only report (no comparison): scorecard keeps all six groups",
+      len([r for r in _eo.iter_rows(values_only=True) if r and r[0] in [g["name"] for g in P.TASK_GROUPS]]), 6)
+check("… previous = lighter tints of the same blue / orange",
+      [str(getattr(s.graphicalProperties.solidFill.srgbClr, "val", s.graphicalProperties.solidFill.srgbClr)) for s in _ch[1].series],
+      [P.CHART_PREV_EFFORT_HEX, P.CHART_PREV_OUTCOME_HEX, P.CHART_EFFORT_HEX, P.CHART_OUTCOME_HEX])
+check("Effort vs Outcome Trend tab: no follow-up groups table",
+      any("FOLLOW-UP GROUPS" in str(c.value or "") for row in _d1["Effort vs Outcome Trend"].iter_rows()
+          for c in row), False)
+_h1 = CE.performance_html("Daily", "06-Oct-2026", r1["summary"], r1["groups"], "https://x", "—",
+                          benchmark=95.0, group_labels=P.EMAIL_GROUP_LABELS,
+                          outcome_rows=r1["outcome_rows"], headline=r1["headline"],
+                          attention=r1["attention"], compare=r1["compare"])
+_g1 = _h1.split("Performance vs Goals", 1)[1]
+_card = _g1.split("Instructor Instructions", 1)[1].split("</table></td></tr></table>", 1)[0]
+check("e-mail: follow-up group card = Yesterday | Today | Change table + paired outcome bars + verdict",
+      [x in _card for x in ("Yesterday", "Mon 05-Oct-2026", "Today", "Tue 06-Oct-2026",
+                            "Tasks Completed", "Effort &middot; Task Completion %",
+                            "Outcome &middot; Sessions Without Escalation %", "&#9679;&nbsp;0.0</span>",
+                            "Follow-up &rarr; Result", "Steady", "sessions 05-Oct 12:00 PM")],
+      [True] * 11)
+check("e-mail: the three groups are named in one reading note, with the 'not proof of cause' caveat",
+      ("Learner Attendance, Learner Assignment, Instructor Instructions</b> are shown Yesterday &rarr; Today" in _g1,
+       "not proof that the follow-ups caused them" in _g1), (True, True))
+check("e-mail: provisional / unavailable outcomes shown as status, not as a plain number",
+      ("prov.</span>" in _g1 and "Nothing to measure" in _g1), True)
+check("e-mail: other groups keep their single-period card (Admission effort + outcome bars)",
+      "Outcome &middot; Formalities Resolved %" in _g1, True)
+check("e-mail without comparison labels (effort-only / old caller) is unchanged",
+      "&#9679;" in CE.performance_html("Daily", "06-Oct-2026", r1["summary"], r1["groups"], "https://x", "—",
+                                        outcome_rows=r1["outcome_rows"]), False)
+_rwc = {r["gk"]: r.get("compare") for r in rw["outcome_rows"]}
+check("Manual report: previous period vs report period, same-period wording",
+      (rw["compare"]["prev_tag"], rw["compare"]["cur_tag"], rw["compare"]["observation"],
+       _rwc["instructor"]["verdict"] in CO.FR_LEVEL), ("Previous Period", "Report Period", "same_period", True))
+check("rules tab explains the comparison", any(k == "Previous vs current" for k, _v in P.OUTCOME_RULES), True)
 
 print("\nALL CHECKS PASSED" if not FAIL else f"\n{len(FAIL)} CHECK(S) FAILED: {FAIL}")
 sys.exit(1 if FAIL else 0)

@@ -351,8 +351,119 @@ def _group_card(title, subtitle, chip_html, accent_hex, body_html, number=None):
             f"<tr><td style='padding:6px 14px 12px'>{body_html}</td></tr></table>")
 
 
+_FR_HEX = {"ok": GREEN, "medium": AMBER, "high": RED, "info": "0D47A1", "muted": MUTED}
+PREV_BAR_HEX = "8FA3BF"           # the previous period's bar: neutral slate (current = verdict colour)
+
+
+def _change_html(v, band=1.0, unit=""):
+    """▲ +3.2 pts (green) / ▼ 21.0 pts (red) / ● 0.4 pts (blue) / — ."""
+    if v is None:
+        return f"<span style='color:#{MUTED}'>&mdash;</span>"
+    if v >= band:
+        sym, hexc = "&#9650;", GREEN
+    elif v <= -band:
+        sym, hexc = "&#9660;", RED
+    else:
+        sym, hexc = "&#9679;", "0D47A1"
+    return (f"<span style='display:inline-block;padding:1px 6px;border-radius:999px;"
+            f"background:#{hexc}14;border:1px solid #{hexc}55;color:#{hexc};font-weight:700;"
+            f"font-size:11.5px;white-space:nowrap'>{sym}&nbsp;{abs(v):.1f}"
+            + (f"&nbsp;{unit}" if unit else "") + "</span>")
+
+
+def _cmp_value(p, av, hexc):
+    """An outcome / effort value of the comparison, or its status when there is
+    no figure (Not available / Nothing to measure …); provisional / in-progress
+    figures carry that tag."""
+    word = (av or ("Final",))[0]
+    if p is None:
+        return f"<span style='color:#{MUTED};font-style:italic;font-size:11.5px'>{_E(word)}</span>"
+    tag = {"Provisional": " <span style='font-size:10px;color:#BF360C'>prov.</span>",
+           "In progress": " <span style='font-size:10px;color:#0D47A1'>to date</span>"}.get(word, "")
+    return f"<b style='color:#{hexc}'>{p:.1f}%</b>{tag}"
+
+
+def compare_card_body(r, cl, benchmark=95.0, band=1.0, impact_hex=None, near_band=15.0):
+    """Previous → current for one follow-up group (e-mail): a 3-row comparison
+    table (tasks done, effort %, outcome %), paired outcome bars against the
+    target, the Follow-up → Result verdict and what each outcome measures.
+    r = a scorecard row with r['compare']; cl = the view's compare labels."""
+    c = r["compare"]
+    ih = impact_hex or {}
+    pt, ct = _E(cl["prev_tag"]), _E(cl["cur_tag"])
+    eff_hex = lambda p: MUTED if p is None else (GREEN if round(p, 1) >= benchmark else RED)
+    target = r.get("target")
+
+    def out_hex(p):
+        if p is None or target is None:
+            return MUTED
+        return ih.get("On target" if p >= target else ("Near target" if p >= target - near_band else
+                                                       "Below target"), MUTED)
+
+    def tasks_txt(s):
+        return (f"<b>{s['completed']} / {s['tasks']}</b>" if s and s.get("tasks") else
+                f"<span style='color:#{MUTED};font-style:italic;font-size:11.5px'>No tasks</span>")
+    obs = (f"Next-day observation &middot; {ct}'s outcome window starts after {pt.lower()}'s task list"
+           if cl.get("observation") == "next_day" else
+           "Same-period comparison &middot; each period's outcome covers its own sessions / deadlines")
+    th = ("<th style='width:22%;padding:6px 4px;font-size:11px;color:#ffffff;background:{bg};text-align:center;"
+          "font-weight:700;line-height:1.25'>{t}<br><span style='font-weight:400;font-size:10px;"
+          "opacity:.9'>{d}</span></th>")
+    td = ("<td style='padding:7px 4px;font-size:12.5px;border-bottom:1px solid #e8edf5;"
+          "text-align:{a};background:{bg}'>{v}</td>")
+    head = ("<tr><th style='width:34%;padding:6px 6px;font-size:11px;color:#ffffff;background:#5b6b86;"
+            "text-align:left'>&nbsp;</th>"
+            + th.format(bg="#5b6b86", t=pt, d=_E(cl["prev_dates"]))
+            + th.format(bg=HEADER, t=ct, d=_E(cl["cur_dates"]) + (
+                f"<br>as of {_E(cl['as_of'])}" if cl.get("as_of") else ""))
+            + th.format(bg="#7A4A12", t="Change", d=f"{ct} &minus; {pt}<br>(points)") + "</tr>")
+    body_rows = [
+        ("Tasks Completed", tasks_txt(c["prev_s"]), tasks_txt(r["s"]), ""),
+        ("Effort &middot; Task Completion %",
+         _cmp_value(c["prev_comp"], None, eff_hex(c["prev_comp"])) if c["prev_comp"] is not None
+         else f"<span style='color:#{MUTED}'>&mdash;</span>",
+         _cmp_value(c["cur_comp"], None, eff_hex(c["cur_comp"])) if c["cur_comp"] is not None
+         else f"<span style='color:#{MUTED}'>&mdash;</span>",
+         _change_html(c["d_completion"], band)),
+        (f"Outcome &middot; {_E(r['measure'])}",
+         _cmp_value(c["prev_actual"], c["prev_av"], out_hex(c["prev_actual"])),
+         _cmp_value(c["cur_actual"], c["cur_av"], out_hex(c["cur_actual"])),
+         _change_html(c["change"], band)),
+    ]
+    trs = ""
+    for i, (lbl, a, b, d) in enumerate(body_rows):
+        bg = "#ffffff" if i % 2 == 0 else "#f6f8fb"
+        trs += ("<tr>" + td.format(a="left", bg=bg, v=f"<span style='color:#1a2a48'>{lbl}</span>")
+                + td.format(a="center", bg=bg, v=a) + td.format(a="center", bg=bg, v=b)
+                + td.format(a="center", bg=bg, v=d) + "</tr>")
+    html = (f"<div style='font-size:10.5px;color:#8494ad;margin:8px 0 4px'>{obs}</div>"
+            "<table role='presentation' width='100%' style='border-collapse:collapse;"
+            f"border:1px solid #e2e8f0;table-layout:fixed'>{head}{trs}</table>")
+    # paired outcome bars: previous (slate) above current (target-coloured)
+    html += _sub_label(f"Actual Outcome &middot; {pt} vs {ct}")
+    for tag, p, av, win, hexc in ((pt, c["prev_actual"], c["prev_av"], c["prev_window"], PREV_BAR_HEX),
+                                  (ct, c["cur_actual"], c["cur_av"], c["cur_window"],
+                                   out_hex(c["cur_actual"]))):
+        note = (f"Target: {target:g}% &nbsp;&middot;&nbsp; " if target is not None else "") + _E(win or "")
+        if p is None:
+            html += (f"<div style='font-size:11.5px;color:#5b6b86;margin:10px 0 4px'>{tag}: "
+                     f"{_E(av[0])}" + (f" &mdash; {_E(av[2])}" if av[2] else "") + "</div>")
+        else:
+            label = f"{p:.1f}%" + (f" ({_E(av[0].lower())})" if av[0] in ("Provisional", "In progress")
+                                   else "")
+            html += bar(f"{tag} &middot; {_E(r['measure'])}", label, p, hexc, target, note)
+    fr_hex = _FR_HEX.get(c["verdict_level"], MUTED)
+    html += ("<div style='margin:10px 0 0;padding:8px 10px;background:#f7f9fc;border:1px solid #e8edf5;"
+             "border-radius:6px;font-size:12px;line-height:1.5'>"
+             f"<b style='color:#1a2a48'>Follow-up &rarr; Result:</b> {_chip(c['verdict'], fr_hex)}"
+             + (f" &nbsp;<span style='color:#5b6b86'>{_E(c['why'])}</span>" if c.get("why") else "")
+             + "</div>")
+    return html
+
+
 def effort_outcome_section(rows, benchmark=95.0, group_labels=None, headline=None,
-                           attention=None, quad_levels=None, overall=None):
+                           attention=None, quad_levels=None, overall=None, compare=None,
+                           compare_band=1.0):
     """The upgraded "Performance vs Goals": ONE card per task group, read top to
     bottom as Task Group -> Effort -> Completion -> Actual Outcome:
       * header: the group, its registry name when the e-mail label differs, and
@@ -376,6 +487,16 @@ def effort_outcome_section(rows, benchmark=95.0, group_labels=None, headline=Non
              f"Actual Performance % (goal = the area's target) &nbsp;&middot;&nbsp; "
              f"<span style='color:#{GREEN}'>&#9632;</span> met "
              f"<span style='color:#{AMBER}'>&#9632;</span> near <span style='color:#{RED}'>&#9632;</span> below</p>")
+    if compare and any(r.get("compare") for r in rows):
+        names = ", ".join(_E(labels.get(r["name"], r["name"])) for r in rows if r.get("compare"))
+        pt, ct = _E(compare["prev_tag"]), _E(compare["cur_tag"])
+        why = (f"their outcome window starts before the day's list is worked, so the result that "
+               f"follows {pt.lower()}'s follow-ups is {ct.lower()}'s figure"
+               if compare.get("observation") == "next_day" else
+               "each period's outcome is measured over that period's own sessions / deadlines")
+        html += (f"<p style='margin:6px 0 0;color:#5b6b86;font-size:12px;line-height:1.5'>"
+                 f"<b style='color:#1a2a48'>{names}</b> are shown {pt} &rarr; {ct}: {why}. "
+                 f"Changes are observations, not proof that the follow-ups caused them.</p>")
     shown = 0
     first = overall_goal_row(overall, benchmark)
     if first:                                   # "Overall Completion %" first, as before
@@ -403,6 +524,16 @@ def effort_outcome_section(rows, benchmark=95.0, group_labels=None, headline=Non
                 + _flow_cell("Task Completion", f"{p:.1f}%" if p is not None else "&mdash;", eff_hex)
                 + _flow_cell("Actual Outcome", f"{a:.1f}%" if a is not None else "&mdash;", act_hex)
                 + "</tr></table>")
+        if compare and r.get("compare"):
+            # follow-up group: previous → current comparison instead of the single-period strip
+            vc = _FR_HEX.get(r["compare"]["verdict_level"], MUTED)
+            q_line = (f"<div style='font-size:11px;color:#5b6b86;margin:8px 0 0'>Effort &rarr; Outcome "
+                      f"({_E(compare['cur_tag'])}): {chip}</div>" if chip else "")
+            html += _group_card(_E(disp), _E(r["name"]) if disp != r["name"] else "",
+                                _chip(r["compare"]["verdict"], vc), vc,
+                                compare_card_body(r, compare, benchmark, compare_band, _IMPACT_HEX)
+                                + q_line, number=shown)
+            continue
         body = flow + _sub_label("Effort &middot; Completion")
         if s["tasks"]:
             body += bar("Effort &middot; Task Completion %", f"{s['completed']} / {s['tasks']} &middot; {p:.1f}%",
@@ -438,7 +569,7 @@ def effort_outcome_section(rows, benchmark=95.0, group_labels=None, headline=Non
 
 def performance_html(kind, label, s, groups, url, median_label, on_track=75.0, watch=45.0,
                      benchmark=95.0, group_labels=None, outcome_rows=None, headline=None,
-                     attention=None):
+                     attention=None, compare=None, compare_band=1.0):
     """Task Performance e-mail. s = summarise() of the period; groups =
     [(group name, summarise() dict)] — the Dashboard scorecard rows.
     outcome_rows (the Effort → Outcome scorecard rows) switch "Performance vs
@@ -457,7 +588,8 @@ def performance_html(kind, label, s, groups, url, median_label, on_track=75.0, w
             + section("Task Volume") + card_block(volume, 3)
             + section("Completion &amp; Timeliness") + card_block(quality, 3)
             + (effort_outcome_section(outcome_rows, benchmark, group_labels, headline, attention,
-                                      _quad_levels(), overall=s)
+                                      _quad_levels(), overall=s, compare=compare,
+                                      compare_band=compare_band)
                if outcome_rows else goals_section(groups, benchmark, group_labels, overall=s)))
     rows = []
     act = {r["name"]: r for r in (outcome_rows or [])}

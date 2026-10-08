@@ -859,6 +859,72 @@ QUAD_LEVEL = {QUAD_PAYING: "ok", QUAD_NOT_CONVERTING: "medium", QUAD_CHECK_TASKS
 
 
 # =============================================================================
+#  PREVIOUS vs CURRENT PERIOD  (Yesterday → Today for the follow-up groups)
+# =============================================================================
+# Attendance, Assignment and Instructor outcomes are measured over a window that
+# STARTS BEFORE the day's task list is worked (the Daily window is yesterday
+# 12:00 PM → the task-list time; assignments due the day before). The day's own
+# tasks are raised FROM that window, so the result that follows a day's
+# follow-ups is the NEXT day's figure. The comparison therefore shows the
+# previous period's effort and outcome next to the current one, each labelled
+# with the window it measures. Wording is deliberately observational: a change
+# that follows follow-ups is not proof that the follow-ups caused it.
+FR_IMPROVED_AFTER = "Improved after follow-ups"
+FR_IMPROVED = "Improved"
+FR_IMPROVED_NO_TASKS = "Improved · no follow-ups"
+FR_STEADY = "Steady"
+FR_DECLINED_DESPITE = "Declined despite follow-ups"
+FR_DECLINED_INCOMPLETE = "Declined · follow-ups incomplete"
+FR_DECLINED_NO_TASKS = "Declined · no follow-ups raised"
+FR_NA = "Not comparable"
+FR_LEVEL = {FR_IMPROVED_AFTER: "ok", FR_IMPROVED: "ok", FR_IMPROVED_NO_TASKS: "ok",
+            FR_STEADY: "info", FR_DECLINED_DESPITE: "medium", FR_DECLINED_INCOMPLETE: "high",
+            FR_DECLINED_NO_TASKS: "medium", FR_NA: "muted"}
+
+
+def followup_result(effort_pct, change, steady_band=1.0, effort_high=75.0):
+    """Verdict for 'are completed follow-ups followed by a better result?'.
+    effort_pct = Task Completion % of the follow-ups that PRECEDED the newer
+    outcome (Daily: the previous day's; period reports: the period's own), None
+    when no task was raised. change = newer outcome − older outcome (points),
+    None when either side is not measured. |change| < steady_band = Steady."""
+    if change is None:
+        return FR_NA
+    if abs(change) < steady_band:
+        return FR_STEADY
+    up = change > 0
+    if effort_pct is None:
+        return FR_IMPROVED_NO_TASKS if up else FR_DECLINED_NO_TASKS
+    if up:
+        return FR_IMPROVED_AFTER if effort_pct >= effort_high else FR_IMPROVED
+    return FR_DECLINED_DESPITE if effort_pct >= effort_high else FR_DECLINED_INCOMPLETE
+
+
+def measurement_window(gk, kind, start, end, cutoff_fn=None) -> dict:
+    """What a group's Actual Performance % measures for one period — the SAME
+    window group_outcome() uses — as {"text", "start", "end"} (start / end =
+    datetime or date, None when not applicable). cutoff_fn(day) = the time of
+    that day's Coordinator task list (OutcomeEngine.cutoff)."""
+    if gk in ("attendance", "instructor"):
+        if kind == "Daily":
+            cut = cutoff_fn(end) if cutoff_fn else datetime.combine(end, time(23, 59, 59))
+            ws, we = attendance_daily_window(end, cut)
+            return {"text": f"sessions {ws:%d-%b %I:%M %p} – {we:%d-%b %I:%M %p}",
+                    "start": ws, "end": we}
+        if gk == "attendance":
+            return {"text": f"sessions dated {start:%d-%b} – {end:%d-%b}", "start": start, "end": end}
+        return {"text": f"each report day's session window, {start:%d-%b} – {end:%d-%b}",
+                "start": start, "end": end}
+    if gk == "assignment":
+        if kind == "Daily":
+            d = end - timedelta(days=1)
+            return {"text": f"assignments due {d:%d-%b} (Assignment Daily {d:%d-%b})",
+                    "start": d, "end": d}
+        return {"text": f"assignments due {start:%d-%b} – {end:%d-%b}", "start": start, "end": end}
+    return {"text": "", "start": None, "end": None}
+
+
+# =============================================================================
 #  SOURCES  (all Google access; tests pass a fake with the same methods)
 # =============================================================================
 class GoogleOutcomeSources:
@@ -1186,6 +1252,9 @@ class OutcomeEngine:
             except Exception as exc:                                # noqa: BLE001
                 log.exception("Outcome %s %s–%s failed: %s", gk, start, end, exc)
                 out[gk] = not_checked(gk, f"error: {exc}")
+            if out[gk] is not None and gk in ("attendance", "assignment", "instructor"):
+                # what this figure measures (shown with the previous-vs-current comparison)
+                out[gk]["window"] = measurement_window(gk, kind, start, end, self.cutoff)
         return out
 
     def detail_rows(self, day: date, tasks: list) -> list:

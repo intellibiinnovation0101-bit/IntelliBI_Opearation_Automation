@@ -206,6 +206,14 @@ OUTCOME_NEAR_BAND = 15.0     # within this many points below target = "Near targ
 EFFORT_HIGH_PCT   = 75.0     # Task Completion % at/above = "High effort" (= On track band)
 TREND_DAYS_DAILY  = 7        # Daily report: the Effort vs Outcome trend shows the last N days
 
+# Previous vs current period (Dashboard scorecard, chart and e-mail) for the
+# groups whose outcome window starts BEFORE the day's list is worked, so the
+# result that follows a day's follow-ups is the NEXT day's figure (Daily:
+# Yesterday → Today; Weekly / Monthly / Manual: previous period → report period).
+# Every figure is the one the report already computes for each period.
+COMPARE_GROUPS      = ["attendance", "assignment", "instructor"]
+COMPARE_STEADY_BAND = 1.0    # |outcome change| below this many points = "Steady"
+
 # =============================================================================
 #  REPORT GENERATION CONTROL  (same scheme as pyLeadFollowUpAnalysisReport.py)
 # =============================================================================
@@ -1264,7 +1272,8 @@ def compute_outcome_view(engine, ledger, job, now) -> dict:
     view = {"enabled": engine is not None, "kind": kind, "cur": {}, "prev": {},
             "prev_label": (ps.strftime("%d-%b-%Y") if ps == pe else
                            f"{ps.strftime('%d-%b-%Y')} – {pe.strftime('%d-%b-%Y')}"),
-            "prev_eff": {}, "trend": [], "details": []}
+            "prev_eff": {}, "trend": [], "details": [],
+            "compare": compare_labels(kind, start, end, ps, pe, now), "now": now}
     psc = scope_ledger(ledger, ps, pe)
     view["prev_eff"] = _effort_by_group(psc)
     days_with_list = lambda sc: sorted({c["day"] for c in sc["coverage"] if c["versions"]})
@@ -1292,6 +1301,88 @@ def _delta(a, b):
     return None if a is None or b is None else round(a - b, 1)
 
 
+# ── Previous vs current period (COMPARE_GROUPS) ──────────────────────────────
+def _range_text(a: date, b: date) -> str:
+    return (a.strftime("%a %d-%b-%Y") if a == b else
+            f"{a.strftime('%d-%b')} – {b.strftime('%d-%b-%Y')}")
+
+
+def compare_labels(kind, start, end, ps, pe, now) -> dict:
+    """Names and dates of the two compared periods, by their ACTUAL reporting
+    dates (never the generation time): Daily = 'Yesterday' / 'Today' when the
+    report day is the run day (else 'Previous Day' / 'Report Day'); Weekly /
+    Monthly / Manual = previous period / report period. 'observation' says how
+    the outcome relates to the effort: next_day (Daily — the newer outcome window
+    starts after the older day's list was raised) or same_period."""
+    today = now.date()
+    if kind == "Daily":
+        tags = (("Yesterday", "Today") if end == today and ps == today - timedelta(days=1)
+                else ("Previous Day", "Report Day"))
+    elif kind == "Weekly":
+        tags = ("Previous Week", "Report Week")
+    elif kind == "Monthly":
+        tags = ("Previous Month", "Report Month")
+    else:
+        tags = ("Previous Period", "Report Period")
+    if kind == "Monthly":
+        prev_dates, cur_dates = ps.strftime("%b-%Y"), start.strftime("%b-%Y")
+    else:
+        prev_dates, cur_dates = _range_text(ps, pe), _range_text(start, end)
+    return {"prev_tag": tags[0], "cur_tag": tags[1], "prev_dates": prev_dates,
+            "cur_dates": cur_dates, "prev_start": ps, "prev_end": pe,
+            "cur_start": start, "cur_end": end,
+            "as_of": now.strftime("%I:%M %p") if end >= today else "",
+            "observation": "next_day" if kind == "Daily" else "same_period"}
+
+
+def outcome_availability(o, kind, end, today) -> tuple:
+    """(status word, level, reason) of one period's outcome figure, so a figure
+    that is not (yet) final is never shown as if it were."""
+    if o is None:
+        return "Not measured", "muted", ""
+    if o["state"] == CO.ST_NOT_CHECKED:
+        return "Not available", "high", o.get("note") or "source could not be read"
+    if o["state"] == CO.ST_NO_DATA:
+        return "Nothing to measure", "muted", o.get("note") or ""
+    if o.get("source") == "provisional":
+        return "Provisional", "medium", o.get("note") or ""
+    if kind != "Daily" and end >= today:
+        return "In progress", "info", f"period not finished — measured up to {today:%d-%b}"
+    return "Final", "ok", ""
+
+
+def compare_row(gk, s, o, prev_s, prev_o, view, now) -> dict:
+    """Previous vs current period for one COMPARE_GROUPS group. Reuses the
+    scorecard's own figures: effort = summarise() of each period, outcome =
+    the period outcomes of compute_outcome_view (view['prev'] / view['cur'])."""
+    cl = view.get("compare") or {}
+    kind = view.get("kind")
+    today = now.date()
+    prev_comp = prev_s["completion_pct"] if prev_s and prev_s["tasks"] else None
+    cur_comp = s["completion_pct"] if s and s["tasks"] else None
+    prev_act = prev_o["pct"] if prev_o else None
+    cur_act = o["pct"] if o else None
+    change = _delta(cur_act, prev_act)
+    # the effort that PRECEDED the newer outcome: Daily = the previous day's
+    # follow-ups (next-day observation); period reports = the period's own
+    effort_ref = prev_comp if cl.get("observation") == "next_day" else cur_comp
+    verdict = CO.followup_result(effort_ref, change, COMPARE_STEADY_BAND, EFFORT_HIGH_PCT)
+    prev_av = outcome_availability(prev_o, kind, cl.get("prev_end", today), today)
+    cur_av = outcome_availability(o, kind, cl.get("cur_end", today), today)
+    why = ""
+    if change is None:
+        side = cl.get("cur_tag", "current") if cur_act is None else cl.get("prev_tag", "previous")
+        av = cur_av if cur_act is None else prev_av
+        why = f"{side}'s outcome: {av[0]}" + (f" — {av[2]}" if av[2] else "")
+    return {"prev_s": prev_s, "prev_o": prev_o, "prev_comp": prev_comp, "cur_comp": cur_comp,
+            "prev_actual": prev_act, "cur_actual": cur_act, "change": change,
+            "d_completion": _delta(cur_comp, prev_comp), "effort_ref": effort_ref,
+            "verdict": verdict, "verdict_level": CO.FR_LEVEL.get(verdict, "muted"), "why": why,
+            "prev_av": prev_av, "cur_av": cur_av,
+            "prev_window": ((prev_o or {}).get("window") or {}).get("text", ""),
+            "cur_window": ((o or {}).get("window") or {}).get("text", "")}
+
+
 def scorecard_rows(ledger, tasks, view=None) -> list:
     """One row per task group: effort (summarise) + outcome + verdicts."""
     view = view or {}
@@ -1314,6 +1405,9 @@ def scorecard_rows(ledger, tasks, view=None) -> list:
                          else CO.QUAD_NA),
             "d_actual": _delta(act, po["pct"] if po else None),
             "d_completion": _delta(comp, pe["completion_pct"] if pe and pe["tasks"] else None),
+            # previous vs current period (COMPARE_GROUPS, outcome view only)
+            "compare": (compare_row(gk, s, o, pe, po, view, view.get("now") or _now_ist())
+                        if view.get("enabled") and gk in COMPARE_GROUPS else None),
         })
     return rows
 
@@ -1465,6 +1559,181 @@ def _effort_outcome_chart(ws, anchor, first, last, n_groups, width_cm):
     return ch
 
 
+# ── Previous vs current period block (Dashboard scorecard) ────────────────────
+CMP_COLS = ["Task Group  ·  Outcome Measure", "Tasks Done", "Effort · Completion %",
+            "Outcome · Actual %", "Tasks Done", "Effort · Completion %", "Outcome · Actual %",
+            "Outcome Change", "Effort Change", "Target", "Follow-up → Result"]
+CMP_PREV_HEX, CMP_CHANGE_HEX = "5B6B86", "7A4A12"     # super-header fills (previous / change)
+CHART_PREV_EFFORT_HEX, CHART_PREV_OUTCOME_HEX = "A9C0E4", "F6C69E"   # lighter tints = previous
+CHANGE_FMT = '"▲ "0.0" pts";"▼ "0.0" pts";"● 0.0 pts"'
+AVAIL_FMT = {"Provisional": '0.0"% · prov."', "In progress": '0.0"% · to date"'}
+
+
+def _cmp_outcome_cell(ws, row, col, act, av, target):
+    """An outcome figure of the comparison; a figure that is not available is
+    shown as its status (never as a number), provisional / in-progress figures
+    carry that tag in the cell."""
+    from openpyxl.comments import Comment
+    word, lvl, why = av
+    if act is None:
+        c = BC.ds_pill(ws, row, col, word, lvl if lvl != "ok" else "muted")
+        c.alignment = AR._align("center", "center", wrap=True)
+    else:
+        lvl2 = (IMPACT_LEVEL[CO.outcome_status(act, target, OUTCOME_NEAR_BAND)]
+                if target is not None else "info")
+        c = BC.ds_pill(ws, row, col, round(act, 1), lvl2, number_fmt=AVAIL_FMT.get(word, PCT_FMT))
+    if why:
+        c.comment = Comment(f"{word}: {why}", "IntelliBI")
+    return c
+
+
+def _cmp_change_cell(ws, row, col, v, bg):
+    if v is None:
+        return BC.ds_cell(ws, row, col, "—", bg=bg, h_align="center", fg=BC.DS_MUTED)
+    lvl = "ok" if v >= COMPARE_STEADY_BAND else ("high" if v <= -COMPARE_STEADY_BAND else "info")
+    return BC.ds_pill(ws, row, col, v, lvl, number_fmt=CHANGE_FMT)
+
+
+def compare_reading_note(cl) -> str:
+    p, c = cl["prev_tag"], cl["cur_tag"]
+    if cl.get("observation") == "next_day":
+        return (f"How to read: {p}'s effort is followed by {c}'s outcome. {c}'s outcome window starts "
+                f"after {p.lower()}'s task list was raised, so it is the first result observed after "
+                f"{p.lower()}'s follow-ups (next-day observation). {c}'s own tasks are raised FROM "
+                f"{c.lower()}'s outcome — their effect shows in the next Daily report. Outcome Change = "
+                f"{c} − {p} (points; within ±{COMPARE_STEADY_BAND:g} = Steady). Follow-up → Result judges "
+                f"{p.lower()}'s Completion % (high ≥ {EFFORT_HIGH_PCT:g}%) against that change. A change "
+                f"is an observation, not proof that the follow-ups caused it.")
+    return (f"How to read: same-period comparison — each period's outcome is measured over that "
+            f"period's own sessions / deadlines, next to that period's follow-ups. Outcome Change = "
+            f"{c} − {p} (points; within ±{COMPARE_STEADY_BAND:g} = Steady). Follow-up → Result judges "
+            f"the {c.lower()}'s Completion % (high ≥ {EFFORT_HIGH_PCT:g}%) against that change. A change "
+            f"is an observation, not proof that the follow-ups caused it.")
+
+
+def build_compare_block(ws, row, NC, rows, view):
+    """Previous vs current period for COMPARE_GROUPS, on the scorecard's grid:
+    Task Group | PREVIOUS (tasks done, effort %, outcome %) | CURRENT (same) |
+    Outcome Change | Effort Change | Target | Follow-up → Result, then one line
+    per group with the window each outcome measures and a reading note.
+    Returns (next free row, first data row, last data row) — (row, None, None)
+    when there is nothing to compare."""
+    crs = [r for r in rows if r.get("compare")]
+    cl = (view or {}).get("compare")
+    if not crs or not cl:
+        return row, None, None
+    row = BC.ds_section(ws, row, NC, f"{cl['prev_tag'].upper()}  →  {cl['cur_tag'].upper()}   ·   "
+                        "FOLLOW-UP GROUPS: COORDINATOR EFFORT, THEN THE RESULT THAT FOLLOWED", level=2)
+    cur_head = f"{cl['cur_tag'].upper()}  ·  {cl['cur_dates']}" + (
+        f"  ·  as of {cl['as_of']}" if cl.get("as_of") else "")
+    for (c0, c1), text, fill in (((1, 1), "", BC.DS_NAV2),
+                                 ((2, 4), f"{cl['prev_tag'].upper()}  ·  {cl['prev_dates']}", CMP_PREV_HEX),
+                                 ((5, 7), cur_head, BC.DS_NAV),
+                                 ((8, 11), "CHANGE  ·  FOLLOW-UP → RESULT", CMP_CHANGE_HEX)):
+        if c1 > c0:
+            ws.merge_cells(start_row=row, start_column=c0, end_row=row, end_column=c1)
+        for cc in range(c0, c1 + 1):
+            x = ws.cell(row=row, column=cc)
+            x.fill = AR._fill(fill)
+            x.border = BC.ds_border()
+        c = ws.cell(row=row, column=c0)
+        c.value = text
+        c.font = AR._font(bold=True, size=9, color=AR.C_WHITE)
+        c.alignment = AR._align("center", "center", wrap=True)
+    ws.row_dimensions[row].height = 20
+    row += 1
+    row = _hdr(ws, row, CMP_COLS, height=30)
+    first = row
+    from openpyxl.comments import Comment
+    for i, r in enumerate(crs):
+        c = r["compare"]
+        bg = BC.ds_zebra(i)
+        BC.ds_cell(ws, row, 1, f"{r['name']}\n{r['measure']}", bg=bg, bold=True, wrap=True, size=9)
+        for col0, s, comp in ((2, c["prev_s"], c["prev_comp"]), (5, r["s"], c["cur_comp"])):
+            if s and s["tasks"]:
+                BC.ds_cell(ws, row, col0, f"{s['completed']} / {s['tasks']}", bg=bg, h_align="center",
+                           bold=True)
+            else:
+                BC.ds_cell(ws, row, col0, "No tasks", bg=bg, h_align="center", fg=BC.DS_MUTED,
+                           italic=True)
+            _pct_cell(ws, row, col0 + 1, comp, bg=bg, bold=True)
+        _cmp_outcome_cell(ws, row, 4, c["prev_actual"], c["prev_av"], r["target"])
+        _cmp_outcome_cell(ws, row, 7, c["cur_actual"], c["cur_av"], r["target"])
+        _cmp_change_cell(ws, row, 8, c["change"], bg)
+        if c["d_completion"] is None:
+            BC.ds_cell(ws, row, 9, "—", bg=bg, h_align="center", fg=BC.DS_MUTED)
+        else:
+            BC.ds_cell(ws, row, 9, c["d_completion"], bg=bg, h_align="center", fg=BC.DS_MUTED,
+                       number_fmt=CHANGE_FMT)
+        BC.ds_cell(ws, row, 10, r["target"] if r["target"] is not None else "—", bg=bg,
+                   h_align="center", number_fmt='0"%"', fg=BC.DS_MUTED)
+        v = BC.ds_pill(ws, row, 11, c["verdict"], c["verdict_level"])
+        v.alignment = AR._align("center", "center", wrap=True)
+        if c["why"]:
+            v.comment = Comment(c["why"], "IntelliBI")
+        ws.row_dimensions[row].height = 34
+        row += 1
+    last = row - 1
+    for r in crs:                                        # what each outcome measures
+        c = r["compare"]
+        text = (f"{r['short']} — {r['measure']} measured over:   {cl['prev_tag']}: "
+                f"{c['prev_window'] or '—'}   →   {cl['cur_tag']}: {c['cur_window'] or '—'}"
+                + (f"   ·   {c['why']}" if c["why"] else ""))
+        row = _note(ws, row, NC, text, italic=False, size=9, height=17)
+    row = _note(ws, row, NC, compare_reading_note(cl), italic=True, size=9,
+                height=15 * max(2, -(-len(compare_reading_note(cl)) // 190)))
+    return row, first, last
+
+
+def _compare_chart(ws, anchor, first, last, cl, width_cm, height_cm):
+    """Previous vs current period, per follow-up group: four bars in reading
+    order — previous effort, previous outcome, current effort, current outcome.
+    Previous = lighter tints of the same blue (effort) / orange (outcome).
+    Data = the Dashboard's own Yesterday → Today block (columns C, D, F, G; a
+    status text such as "Not available" in place of a figure draws no bar)."""
+    from openpyxl.chart.label import DataLabelList
+    from openpyxl.chart.series import SeriesLabel
+    from openpyxl.chart.shapes import GraphicalProperties
+    from openpyxl.drawing.line import LineProperties
+    ch = BarChart()
+    ch.type = "bar"
+    ch.grouping = "clustered"
+    ch.title = f"Follow-up groups · {cl['prev_tag']} vs {cl['cur_tag']}"
+    ch.style = 10
+    ch.height, ch.width = height_cm, width_cm
+    ch.gapWidth = 60
+    ch.overlap = -5
+    for col, label, colour in (
+            (3, f"{cl['prev_tag']} · Effort", CHART_PREV_EFFORT_HEX),
+            (4, f"{cl['prev_tag']} · Outcome", CHART_PREV_OUTCOME_HEX),
+            (6, f"{cl['cur_tag']} · Effort", CHART_EFFORT_HEX),
+            (7, f"{cl['cur_tag']} · Outcome", CHART_OUTCOME_HEX)):
+        ch.add_data(Reference(ws, min_col=col, min_row=first, max_row=last), titles_from_data=False)
+        s = ch.series[-1]
+        s.tx = SeriesLabel(v=label)
+        s.graphicalProperties.solidFill = colour
+        s.graphicalProperties.line.solidFill = colour
+        s.dLbls = DataLabelList()
+        s.dLbls.showVal = True
+        s.dLbls.showSerName = s.dLbls.showCatName = s.dLbls.showLegendKey = False
+        s.dLbls.numFmt = '0.0"%"'
+        s.dLbls.position = "outEnd"
+    ch.set_categories(Reference(ws, min_col=1, min_row=first, max_row=last))
+    ch.x_axis.scaling.orientation = "maxMin"
+    ch.x_axis.delete = False
+    ch.x_axis.tickLblSkip = 1
+    ch.y_axis.delete = False
+    ch.y_axis.scaling.min = 0
+    ch.y_axis.scaling.max = 110
+    ch.y_axis.majorUnit = 25
+    ch.y_axis.number_format = '0"%"'
+    ch.y_axis.crosses = "max"
+    ch.y_axis.majorGridlines.spPr = GraphicalProperties(ln=LineProperties(solidFill="E3E8EF"))
+    ch.legend.position = "t"
+    ws.add_chart(ch, anchor)
+    return ch
+
+
 def build_dashboard(ws, ledger, tasks, period_label, is_daily, now, view=None):
     NC = len(DASH_COLS)
     total = summarise(tasks)
@@ -1523,8 +1792,12 @@ def build_dashboard(ws, ledger, tasks, period_label, is_daily, now, view=None):
     ws.row_dimensions[row].height = 18
     row += 1
     row = _hdr(ws, row, DASH_COLS, height=32)
+    # Groups shown in the Yesterday → Today block below are not repeated here
+    # (presentation only: totals, KPI cards, headline and e-mail still use every group).
+    in_compare = bool((view or {}).get("compare")) and any(r.get("compare") for r in rows)
+    card_rows = [r for r in rows if not (in_compare and r.get("compare"))]
     first = row
-    for i, r in enumerate(rows):
+    for i, r in enumerate(card_rows):
         s, o = r["s"], r["o"]
         lvl = _status_level(s["status"]) if s["tasks"] else "muted"
         bg = _row_tint(lvl, BC.ds_zebra(i))
@@ -1567,18 +1840,42 @@ def build_dashboard(ws, ledger, tasks, period_label, is_daily, now, view=None):
     BC.ds_cell(ws, row, 9, "", bg=tb)
     BC.ds_cell(ws, row, 10, f"{ot['on_target']} of {ot['measured']} on target" if ot["measured"]
                else "not measured", bg=tb, bold=True, size=9, h_align="center")
-    BC.ds_cell(ws, row, 11, "Actual % = simple average", bg=tb, size=8, h_align="center",
-               fg=BC.DS_MUTED, italic=True, wrap=True)
-    ws.row_dimensions[row].height = 22
+    n_cmp = len(rows) - len(card_rows)
+    BC.ds_cell(ws, row, 11, (f"Incl. the {n_cmp} follow-up groups below · Actual % = simple average"
+                             if n_cmp else "Actual % = simple average"),
+               bg=tb, size=8, h_align="center", fg=BC.DS_MUTED, italic=True, wrap=True)
+    ws.row_dimensions[row].height = 30 if n_cmp else 22
     row += 2                                             # one spacer row
 
-    # ── Chart only: Effort vs Actual Outcome per task group ───────────────────
+    # ── Previous vs current period for the follow-up groups (same grid) ───────
+    row, _cf, _cl = build_compare_block(ws, row, NC, rows, view)
+    if _cf is not None:
+        row += 1
+
+    # ── Charts: Effort vs Actual Outcome per task group; beside it, the
+    #    follow-up groups previous vs current (data: Effort vs Outcome Trend tab)
     if rows and (total["tasks"] or ot["measured"]):
         row = BC.ds_section(ws, row, NC, "EFFORT VS OUTCOME BY TASK GROUP", level=2)
-        h = max(7.5, 2.2 + 1.35 * len(rows))
+        side = _cf is not None                           # the Yesterday → Today block was drawn
+        n_card = len(card_rows)                          # the scorecard's own groups (charted left)
+        h = max(7.5, 2.2 + 1.35 * n_card) if n_card else 7.5
+        if side:
+            h = max(h, 2.6 + 2.4 * (_cl - _cf + 1))
         anchor, row = _chart_below(ws, row, h)
-        _effort_outcome_chart(ws, anchor, first, last, len(rows),
-                              round(_grid_width_cm(DASH_WIDTHS) - 0.4, 1))
+        split = 5                                        # A–E | F–K: two equal halves
+        if n_card:
+            _effort_outcome_chart(ws, anchor, first, last, n_card,
+                                  round(_grid_width_cm(DASH_WIDTHS[:split] if side else DASH_WIDTHS)
+                                        - 0.4, 1))
+            if side:
+                ws._charts[-1].height = h
+                ws._charts[-1].title = (f"Other task groups · {view['compare']['cur_tag']}" if n_cmp
+                                        else f"All task groups · {view['compare']['cur_tag']}")
+        if side:
+            _compare_chart(ws, f"{_gcl(split + 1)}{anchor[1:]}" if n_card else anchor,
+                           _cf, _cl, view["compare"],
+                           round(_grid_width_cm(DASH_WIDTHS[split:] if n_card else DASH_WIDTHS)
+                                 - 0.4, 1), h)
     BC.ds_fit_guide(ws, NC)
     ws.freeze_panes = "A3"
     ws.sheet_view.showGridLines = False
@@ -2062,6 +2359,22 @@ OUTCOME_RULES = [
     ("Quadrants", f"High effort = Task Completion % ≥ {EFFORT_HIGH_PCT:g}%; good outcome = Actual ≥ target.  "
                   f"High·Good = {CO.QUAD_PAYING}; High·Low = {CO.QUAD_NOT_CONVERTING}; "
                   f"Low·Good = {CO.QUAD_CHECK_TASKS}; Low·Low = {CO.QUAD_ATTENTION}."),
+    ("Previous vs current", "Attendance, Assignment and Instructor: the outcome window starts BEFORE the "
+                            "day's list is worked (sessions from yesterday 12:00 PM; assignments due the "
+                            "day before) and the day's tasks are raised FROM it, so the result that follows "
+                            "a day's follow-ups is the NEXT day's figure. Daily reports therefore show "
+                            "Yesterday's effort and outcome next to Today's, each labelled with its own "
+                            "dates and measurement window (next-day observation). Weekly / Monthly / Manual "
+                            "show the previous period next to the report period (same-period comparison). "
+                            "Outcome Change = current − previous Actual % (the same Δ the report already "
+                            f"uses); within ±{COMPARE_STEADY_BAND:g} point = Steady. Follow-up → Result: "
+                            f"Completion % of the follow-ups before the newer outcome (Daily: yesterday's; "
+                            f"period reports: the period's) high (≥ {EFFORT_HIGH_PCT:g}%) or not, against "
+                            f"that change — '{CO.FR_IMPROVED_AFTER}', '{CO.FR_DECLINED_DESPITE}', "
+                            f"'{CO.FR_DECLINED_INCOMPLETE}', '{CO.FR_STEADY}', …  An outcome that is not "
+                            "available yet is shown as its status (Not available / Provisional / In "
+                            "progress), never as a number. A change is an observation, not proof that "
+                            "the follow-ups caused it."),
 ]
 
 
@@ -2080,7 +2393,7 @@ RULE_SECTIONS = [
      ["Effort → Outcome", "Attendance", "Assignment", "Admission", "Wise & IV Feedback",
       "Instructor", "Interview"]),
     ("5", "TARGETS & EFFORT → OUTCOME VERDICTS", "info",
-     ["Targets", "Quadrants"]),
+     ["Targets", "Quadrants", "Previous vs current"]),
     ("6", "IMPORTANT LIMITATIONS & CONDITIONS", "medium",
      ["Not applicable / not checked", "Stored checks", "DateTime caveat"]),
 ]
@@ -2400,6 +2713,7 @@ def run_jobs(jobs, versions, loader, now, upload=None, engine=None, refresh_note
                 out["outcome_rows"] = rows
                 out["headline"] = headline(s, rows)
                 out["attention"] = outcome_totals(rows)["attention"]
+                out["compare"] = view.get("compare")
             buf = io.BytesIO()                  # in memory only — never written to disk
             wb.save(buf)
             if upload:
@@ -2616,7 +2930,8 @@ def email_results(results) -> bool | None:
                                    benchmark=COMPLETION_BENCHMARK,
                                    group_labels=EMAIL_GROUP_LABELS,
                                    outcome_rows=r.get("outcome_rows"),
-                                   headline=r.get("headline"), attention=r.get("attention"))
+                                   headline=r.get("headline"), attention=r.get("attention"),
+                                   compare=r.get("compare"), compare_band=COMPARE_STEADY_BAND)
         ok = CE.send(subject, body, EMAIL_RECIPIENTS, sender=EMAIL_SENDER,
                      star=STAR_EMAIL_IN_GMAIL) and ok
     return ok
