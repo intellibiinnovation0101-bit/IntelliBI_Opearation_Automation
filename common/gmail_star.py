@@ -58,7 +58,8 @@ MAX_SESSIONS = 2                        # reconnect once on a dropped IMAP sessi
 _GIVE_UP: dict = {}
 
 # Subjects of the starred report e-mails (used only by --check)
-REPORT_SUBJECTS = ("Coordinator Task Performance Report", "Batch Coordinator Report",
+REPORT_SUBJECTS = ("Coordinator Task Performance Report", "Coordinator Task List Report",
+                   "Batch Coordinator Report",
                    "Assignment Submission Report", "Attendance & Feedback Report",
                    "Reminder Run",
                    "Lead Report", "Lead Follow-Up Analysis Report")

@@ -154,7 +154,7 @@ BC._iv_services = _no_iv
 _real_build_interview = BC.build_interview_reminders
 
 
-def _upload_report(folders, filename, buf, base_prefix):
+def _upload_report(folders, filename, buf, base_prefix, legacy_prefixes=()):
     UPLOADS.append({"folders": list(folders), "filename": filename, "xlsx": buf.getvalue()})
     return "https://docs.google.com/spreadsheets/d/test/edit"
 
@@ -187,12 +187,12 @@ check("every tab heading shows 02-Oct-2026",
       {t: ("02-Oct-2026" in h) for t, h in heads.items()}, {t: True for t in heads})
 check("no tab heading shows the run date 03-Oct-2026", [t for t, h in heads.items() if "03-Oct-2026" in h], [])
 subj, body, rcpts = MAILS[0]
-check("e-mail subject", subj, "Daily Batch Coordinator Report - 02-Oct-2026")
+check("e-mail subject", subj, "Daily Coordinator Task List Report - 02-Oct-2026")
 import re as _re                                                          # noqa: E402
 _content = _re.split(r"Generated", body)[0]          # the footer stamps the real generation time
 check("e-mail body names 02-Oct-2026, not 03-Oct-2026", ("02-Oct-2026" in _content, "03-Oct-2026" in _content),
       (True, False))
-check("… and is not worded as today's list", ("Today's" in body, "The Coordinator task list for" in body),
+check("… and is not worded as today's list", ("Today's" in body, "The <b>Coordinator Task List Report</b> for" in body),
       (False, True))
 check("footer still shows the real generation time", "Generated" in body, True)
 check("recipients unchanged", rcpts, BC.EMAIL_RECIPIENTS)
@@ -204,8 +204,9 @@ res = BC.generate()
 check("report for today", res[0]["report_date"], "2026-10-03")
 check("window 02-Oct 12:00 PM → now", CAPT["att_daily"], ["in-2", "next-day"])
 check("Drive folder Daily 03-Oct-2026", UPLOADS[0]["folders"][-1], "Daily 03-Oct-2026")
-check("subject", MAILS[0][0], "Daily Batch Coordinator Report - 03-Oct-2026")
-check("today's report keeps the existing wording", "Today's Coordinator task list for" in MAILS[0][1], True)
+check("subject", MAILS[0][0], "Daily Coordinator Task List Report - 03-Oct-2026")
+check("today's report: 'Today's Coordinator Task List Report for …'",
+      "Today's <b>Coordinator Task List Report</b> for" in MAILS[0][1], True)
 
 print("\nALL CHECKS PASSED" if not FAIL else f"\n{len(FAIL)} CHECK(S) FAILED: {FAIL}")
 sys.exit(1 if FAIL else 0)

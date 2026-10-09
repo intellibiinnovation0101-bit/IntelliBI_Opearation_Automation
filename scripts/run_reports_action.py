@@ -58,10 +58,10 @@ JOBS = [
     ("pyStudentAdditionalNote", "Student Additional Note", []),
     ("pyWiseDataValidationReport", "Wise Data Validation Report",
         ["pyStudentPaymentClassesStudentEnrolled"]),
-    # Batch Coordinator daily task list — reads attendance/feedback, students,
+    # Daily Coordinator Task List Report — reads attendance/feedback, students,
     # assignment submissions and admission (Zoho) data, so it waits for all four
     # Layer-1 refreshes and is skipped (never built on stale data) if one failed.
-    ("pyCoordinatorTaskListReport", "Batch Coordinator Daily Report",
+    ("pyCoordinatorTaskListReport", "Daily Coordinator Task List Report",
         ["pySessionAttendanceStudentTeacherFeedbacks", "pyStudentPaymentClassesStudentEnrolled",
          "pyAssignmentSubmissions", "pyZohoSignatureStatusRefresh"]),
 ]

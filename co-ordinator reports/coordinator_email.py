@@ -4,7 +4,7 @@
   COORDINATOR REPORT E-MAILS  (co-ordinator reports / coordinator_email.py)
   ------------------------------------------------------------------------------
   E-mail for the two Coordinator reports:
-      pyCoordinatorTaskListReport.py   (task lists)
+      pyCoordinatorTaskListReport.py   (<Type> Coordinator Task List Report)
       pyCoordinatorTaskPerformanceReport.py        (completion & timeliness)
 
   Modelled on the IntelliBI report e-mail already in production
@@ -638,8 +638,12 @@ def _quad_levels():
         return {}
 
 
+TASK_LIST_REPORT_NAME = "Coordinator Task List Report"
+
+
 def batch_coordinator_html(kind, label, url, task_counts=None, note=None, today_label=None):
-    """Batch Coordinator e-mail. task_counts = {task tab: rows needing action}
+    """"<Type> Coordinator Task List Report" e-mail (formerly "Batch Coordinator
+    Report"; the function keeps its name for existing callers). task_counts = {task tab: rows needing action}
     for the Daily task list (None for the Weekly / Monthly / Manual roll-ups).
     today_label = the run day ("DD-Mon-YYYY"); a Daily report for another day
     (DAILY_DATE pinned) is then not worded as "Today's"."""
@@ -654,13 +658,12 @@ def batch_coordinator_html(kind, label, url, task_counts=None, note=None, today_
         body += f"<p style='margin:12px 0 0;color:#5b6b86;font-size:12.5px'>{_E(note)}</p>"
     if kind == "Daily":
         intro = (("Today's" if is_today else "The") +
-                 f" Coordinator task list for <b>{_E(label)}</b> is ready. "
+                 f" <b>{TASK_LIST_REPORT_NAME}</b> for <b>{_E(label)}</b> is ready. "
                  "Please work through each tab and record <b>Action Taken</b>, "
                  "<b>Follow-Up Comment</b> and <b>Follow-Up Done?</b> directly in the Google Sheet "
                  "— the evening Task Performance report reads them from there.")
-        link = "Daily Coordinator Task List"
     else:
-        intro = (f"Please find the <b>{_E(kind)}</b> Batch Coordinator follow-up summary for "
+        intro = (f"Please find the <b>{_E(kind)} {TASK_LIST_REPORT_NAME}</b> for "
                  f"<b>{_E(label)}</b> (one row per learner / instructor over the period).")
-        link = f"{kind} Batch Coordinator Report"
-    return page(f"{kind} Batch Coordinator Report", label, intro, body, url, link)
+    name = f"{kind} {TASK_LIST_REPORT_NAME}"
+    return page(name, label, intro, body, url, name)

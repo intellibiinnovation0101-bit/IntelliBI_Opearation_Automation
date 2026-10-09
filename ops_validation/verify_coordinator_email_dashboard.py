@@ -459,7 +459,7 @@ check("SEND_EMAIL=True: one e-mail per report, from info@, to both recipients",
       (len(SENT), {x["from"] for x in SENT}, [x["to"] for x in SENT]),
       (2, {"info@intellibiinnovationstechnologies.in"}, [RECIPIENTS, RECIPIENTS]))
 check("… subjects", [mail_text(x).split("\n")[0] for x in SENT],
-      ["Daily Batch Coordinator Report - 05-Oct-2026", "Weekly Batch Coordinator Report - 28 Sep – 04 Oct 2026"])
+      ["Daily Coordinator Task List Report - 05-Oct-2026", "Weekly Coordinator Task List Report - 28 Sep – 04 Oct 2026"])
 check("… each carries its Google Sheet link",
       ["spreadsheets/d/x" in mail_text(SENT[0]), "spreadsheets/d/w" in mail_text(SENT[1])], [True, True])
 check("… daily e-mail shows the task count per tab",

@@ -570,8 +570,10 @@ perf_src = open(os.path.join(ROOT, "co-ordinator reports", "pyCoordinatorTaskPer
                 encoding="utf-8").read()
 check("performance report imports the renamed module",
       "import pyCoordinatorTaskListReport as BC" in perf_src, True)
-check("Drive report name unchanged (history & versioning keep working)",
-      BC.REPORT_BASENAME, "IntelliBI_Batch_Coordinator_Daily_Attendance_Report")
+check("Drive report name = Coordinator Task List; the earlier name still recognised (history & versioning)",
+      (BC.REPORT_BASENAME, BC.TASK_LIST_BASENAMES),
+      ("IntelliBI_Coordinator_Task_List_Report_Daily",
+       ("IntelliBI_Coordinator_Task_List_Report_Daily", "IntelliBI_Batch_Coordinator_Daily_Attendance_Report")))
 check("logger renamed", BC.log.name, "CoordinatorTaskList")
 
 print()

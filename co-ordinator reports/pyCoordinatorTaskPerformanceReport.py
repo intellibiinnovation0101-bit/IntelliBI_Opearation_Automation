@@ -677,12 +677,15 @@ def discover_report_versions(drive, ranges) -> list:
     """Every native-Sheet version of the DAILY Coordinator task report whose
     report day falls inside one of `ranges` [(start, end), …] (task origin = the
     report day; folders: _daily_folder_files).
-    Only files named like the daily task report (BC.REPORT_BASENAME) are used —
+    Only files named like the daily task report are used — the current
+    "IntelliBI_Coordinator_Task_List_Report_Daily…" and the earlier
+    "IntelliBI_Batch_Coordinator_Daily_Attendance_Report…" (BC.TASK_LIST_BASENAMES) —
     Weekly / Monthly / Manual roll-ups have no follow-up columns and are not task
     lists, and performance reports are never read as task lists."""
     versions = []
     for day, folder, x in _daily_folder_files(drive, ranges):
-        if not x.get("name", "").startswith(BC.REPORT_BASENAME):
+        if not x.get("name", "").startswith(tuple(getattr(BC, "TASK_LIST_BASENAMES",
+                                                         (BC.REPORT_BASENAME,)))):
             continue
         m = _VERSION.search(x["name"])
         versions.append({"id": x["id"], "name": x["name"], "day": day,
@@ -2283,7 +2286,8 @@ def build_register(ws, ledger, tasks, period_label):
 
 
 RULES = [
-    ("Source", "The Batch Coordinator daily reports (every version in <coordinator folder>/YYYY-MM-DD/) "
+    ("Source", "The Daily Coordinator Task List reports (formerly Batch Coordinator; every version in "
+               "<coordinator folder>/Daily Coordinator Reports/Daily DD-Mon-YYYY/) "
                "— the only place the Coordinator records Action Taken / Comment / Done? / DateTime."),
     ("Task", "One flagged row on one report day's action list, identified by the task group's stable "
              "fields (learner / assignment / session / record). Rank, row order and figures are ignored."),

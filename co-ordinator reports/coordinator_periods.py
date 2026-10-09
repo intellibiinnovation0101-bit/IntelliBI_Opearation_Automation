@@ -16,7 +16,8 @@
         <Coordinator root 1BEokUc7Np7iBVSMwIyMAgZUa0mrecT-h>
           ├── Daily Coordinator Reports
           │     └── Daily 01-Oct-2026
-          │           ├── IntelliBI_Batch_Coordinator_Daily_Attendance_Report_…
+          │           ├── IntelliBI_Coordinator_Task_List_Report_Daily_…  (before 09-Oct-2026:
+          │           │       IntelliBI_Batch_Coordinator_Daily_Attendance_Report_…)
           │           └── IntelliBI_Coordinator_Task_Performance_Report_Daily_…
           ├── Weekly Coordinator Reports
           │     └── Weekly 21-Sep-2026 to 27-Sep-2026
@@ -28,7 +29,7 @@
       The period-folder names follow the IntelliBI convention already used by
       pyLeadFollowUpAnalysisReport.py (_period_folder_name). Because both reports
       derive the folder from (report type, start, end) through THIS module, the
-      Batch Coordinator report and the Task Performance report for the same type
+      Coordinator Task List report and the Task Performance report for the same type
       and period always land in the SAME folder. Folders are resolved by name at
       run time (created when missing); files inside are versioned by the existing
       no-overwrite upload (pyCoordinatorTaskListReport.upload_report).
@@ -228,9 +229,11 @@ def classify_legacy_file(name: str, folder_day: date | None):
     """(kind, start, end) a legacy Coordinator file belongs to, or None to leave
     it where it is (e.g. the older 'Coordinator Attendance Tasks' sheets)."""
     base = _VERSION_SUFFIX.sub("", name or "")
-    if base.startswith("IntelliBI_Batch_Coordinator_Daily_Attendance_Report") and folder_day:
+    if (base.startswith("IntelliBI_Batch_Coordinator_Daily_Attendance_Report")
+            or base.startswith("IntelliBI_Coordinator_Task_List_Report_Daily")) and folder_day:
         return ("Daily", folder_day, folder_day)
-    m = re.match(r"^IntelliBI_Batch_Coordinator_(Weekly|Monthly|Manual)_Follow_Ups_(.+)$", base)
+    m = (re.match(r"^IntelliBI_Batch_Coordinator_(Weekly|Monthly|Manual)_Follow_Ups_(.+)$", base)
+         or re.match(r"^IntelliBI_Coordinator_Task_List_Report_(Weekly|Monthly|Manual)_(.+)$", base))
     if m:
         return _parse_period_label(m.group(1), m.group(2))
     m = re.match(r"^IntelliBI_Coordinator_Task_Performance_Report_(Daily|Weekly|Monthly|Manual)_(.+)$", base)

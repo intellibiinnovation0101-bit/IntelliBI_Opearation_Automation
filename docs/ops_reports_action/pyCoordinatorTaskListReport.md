@@ -1,15 +1,27 @@
-# pyCoordinatorTaskListReport.py
+# pyCoordinatorTaskListReport.py — Coordinator Task List Report
 
-*Formerly `pyBatchCoordinatorDailyAttendanceReport.py`, renamed 2026-10-01. Only the file name changed; the Drive report name `IntelliBI_Batch_Coordinator_Daily_Attendance_Report`, the e-mail subject and the morning-batch job label "Batch Coordinator Daily Report" are unchanged, so earlier reports, versioning and the Task Performance report keep working.*
+**Report name (from 09-Oct-2026): `<Type> Coordinator Task List Report`** — *Daily / Weekly / Monthly / Manual Coordinator Task List Report* (formerly "Batch Coordinator Report"). Used in the e-mail subject and heading, every tab's title band, the Drive / file names (`IntelliBI_Coordinator_Task_List_Report_<Type>_<period>`), the console / log lines and the morning-batch job label. The script name, calculations, tabs, Drive folders and schedule are unchanged.
 
-Location: `co-ordinator reports/`. Output: `IntelliBI_Batch_Coordinator_Daily_Attendance_Report_<window>` (native Google Sheet) plus Weekly / Monthly / Manual roll-ups, saved in the shared Coordinator layout (see **Drive layout & scheduling** below). Runs in the Operations **Morning batch** (`scripts/run_reports_action.py`).
+| Where | Daily | Weekly / Monthly / Manual |
+|---|---|---|
+| E-mail subject | `Daily Coordinator Task List Report - 09-Oct-2026` | `Weekly Coordinator Task List Report - <period>` (Monthly / Manual alike) |
+| E-mail heading & button | `Daily Coordinator Task List Report` | `<Type> Coordinator Task List Report` |
+| Tab title band | `IntelliBI  \|  Daily Coordinator Task List Report — <tab>  \|  <period>` | `IntelliBI  \|  <Type> Coordinator Task List Report — <tab> (period roll-up)  \|  <period>` |
+| Drive file | `IntelliBI_Coordinator_Task_List_Report_Daily_<window>` (+ ` - Version N`) | `IntelliBI_Coordinator_Task_List_Report_<Type>_<period>` (+ ` - Version N`) |
+| Before 09-Oct-2026 | `IntelliBI_Batch_Coordinator_Daily_Attendance_Report_<window>` | `IntelliBI_Batch_Coordinator_<Type>_Follow_Ups_<period>` |
+
+Earlier files keep their names. Both names are recognised (`TASK_LIST_BASENAMES`, `period_basenames()`): the `- Version N` numbering of a day / period continues across the rename, the Task Performance report reads task lists under either name, and the legacy-folder migration classifies both.
+
+*Formerly `pyBatchCoordinatorDailyAttendanceReport.py`, renamed 2026-10-01 (file name only). The report itself was renamed on 2026-10-09 — see above.*
+
+Location: `co-ordinator reports/`. Output: `IntelliBI_Coordinator_Task_List_Report_Daily_<window>` (native Google Sheet) plus Weekly / Monthly / Manual roll-ups, saved in the shared Coordinator layout (see **Drive layout & scheduling** below). Runs in the Operations **Morning batch** (`scripts/run_reports_action.py`).
 
 ## Drive layout & scheduling
 - Folders come from `co-ordinator reports/coordinator_periods.py`, shared with `pyCoordinatorTaskPerformanceReport.py`, so both reports for the same type and period land in one folder:
   `<coordinator root>/Daily Coordinator Reports/Daily 01-Oct-2026/`, `Weekly Coordinator Reports/Weekly 21-Sep-2026 to 27-Sep-2026/`, `Monthly Coordinator Reports/Monthly Sep-2026/`, `Manual Coordinator Reports/Manual 21-Aug-2026 to 22-Sep-2026/`.
 - `upload_report()` accepts the (type folder, period folder) pair and keeps its never-overwrite versioning (`- Version N`) per report base name.
 - Reports made before this layout are in `<root>/YYYY-MM-DD/`. To move them across (files keep their ids/links), run `python "co-ordinator reports/coordinator_periods.py" --migrate-legacy` for a dry run, then add `--apply`.
-- Morning batch: Layer-2 job "Batch Coordinator Daily Report", gated on all four Layer-1 refreshes. AUTO mode produces Daily every run (for `DAILY_DATE` when it is set, otherwise today in IST), Weekly on Monday (previous Mon–Sun) and Monthly on the last day of the month. Keep `DAILY_DATE = None` for scheduled runs: a pinned date makes every run rebuild that same day. The script now exits 1 when a planned report fails, so the pipeline records it and the 11:30 window retries.
+- Morning batch: Layer-2 job "Daily Coordinator Task List Report", gated on all four Layer-1 refreshes. AUTO mode produces Daily every run (for `DAILY_DATE` when it is set, otherwise today in IST), Weekly on Monday (previous Mon–Sun) and Monthly on the last day of the month. Keep `DAILY_DATE = None` for scheduled runs: a pinned date makes every run rebuild that same day. The script now exits 1 when a planned report fails, so the pipeline records it and the 11:30 window retries.
 
 ## Purpose
 One action list per day for the Batch Coordinator. Every tab answers, row by row:
@@ -75,7 +87,7 @@ Things to know:
 - Checked offline by `ops_validation/verify_coordinator_sheet_protection.py`, which tests every cell of real report tabs for the Coordinator, the owner and the service account.
 
 ## E-mail
-One e-mail **per generated report** goes from `info@intellibiinnovationstechnologies.in` to `info@intellibiinnovationstechnologies.in` and `intellibihropsb2ch@gmail.com`. The subject is `<Type> Batch Coordinator Report - <period>`.
+One e-mail **per generated report** goes from `info@intellibiinnovationstechnologies.in` to `info@intellibiinnovationstechnologies.in` and `intellibihropsb2ch@gmail.com`. The subject is `<Type> Coordinator Task List Report - <period>` (before 09-Oct-2026: `<Type> Batch Coordinator Report - <period>`).
 - The layout follows the Sales lead-performance e-mail.
 - The Daily e-mail shows the task count per tab (from each tab's own guide count) and asks the Coordinator to record follow-ups in the sheet.
 - Weekly / Monthly / Manual roll-ups send their link.
@@ -88,6 +100,7 @@ One e-mail **per generated report** goes from `info@intellibiinnovationstechnolo
 Google Drive is the only place this report is stored. Every workbook (Daily, Weekly, Monthly, Manual) is built in an in-memory buffer and uploaded from it (`upload_report()` → `MediaIoBaseUpload`). Nothing is written to `output/reports/` or to any temporary file, and the e-mail carries the Google Sheet link, not an attachment. `ops_validation/verify_coordinator_email_dashboard.py` checks this.
 
 ## Change history
+- 2026-10-09 — **Report renamed** "Batch Coordinator Report" → **"<Type> Coordinator Task List Report"** (Daily / Weekly / Monthly / Manual): e-mail subject, heading, intro and button; every tab's title band; Drive / file names `IntelliBI_Coordinator_Task_List_Report_<Type>_<period>`; console lines; morning-batch job label and completion-e-mail label (`common/exec_summary.py`). Earlier names stay recognised for versioning, the Task Performance report's discovery (`TASK_LIST_BASENAMES`) and the legacy migration. `common/gmail_star.py --check` looks for both subjects. Naming only — script name, tabs, calculations, Drive folders and scheduling unchanged.
 - 2026-10-05 — Wise & Interview Feedback Validation: the ✎ Action Taken dropdown has one more option, `Not Applicable` (after the existing ones). Other tabs' dropdowns, follow-up logic and protection are unchanged. Covered by `ops_validation/verify_coordinator_sheet_protection.py`.
 - 2026-10-03 — **Fix:** `DAILY_DATE` was ignored when `GENERATE_AUTO = True`. AUTO always used the run date, so `DAILY_DATE = "2026-10-02"` produced a 03-Oct report. The Daily date now comes from one helper, `_daily_report_date()`, in both AUTO and flag mode. A set date drives the data window, as-of aggregates, period label, file name, Drive folder, tab headings and e-mail subject and body. A malformed value stops with a clear error. The e-mail is worded "Today's" only when the report is for today. Weekly, Monthly, Manual and scheduling are unchanged. Covered by `ops_validation/verify_coordinator_daily_date.py`.
 - 2026-10-01 — **Renamed** from `pyBatchCoordinatorDailyAttendanceReport.py` to `pyCoordinatorTaskListReport.py`, with every reference updated (scheduler job, performance-report import, verify scripts, run summary, docs, shared `gmail_star`) and the logger renamed `CoordinatorTaskList`. **Sheet access & protection** added (`protect_and_share`, see above): `intellibihropsb2ch@gmail.com` can edit only Action Taken / Follow-Up Comment / Follow-Up Done?, and everything else is protected for everyone but info@ and the service account. Report content, task logic, Drive name and layout, versioning and e-mail are unchanged.

@@ -1,8 +1,10 @@
 """
 ================================================================================
   IntelliBI Operations Automation
-  BATCH COORDINATOR — Daily Attendance Task Report
+  COORDINATOR TASK LIST REPORT  (Daily / Weekly / Monthly / Manual)
   (co-ordinator reports / pyCoordinatorTaskListReport.py)
+  Named "<Type> Coordinator Task List Report" (formerly "Batch Coordinator
+  Report") — e-mail, sheet titles, Drive / file names and logs.
   ------------------------------------------------------------------------------
   WHAT THIS IS
     A DAILY, technology-wise, student-level attendance report that EXTENDS the
@@ -25,9 +27,10 @@
     layout (coordinator_periods.py) so history is never overwritten and the
     Task Performance report for the same period sits in the same folder:
         <parent>/Daily Coordinator Reports/Daily 12-Sep-2026/
-            IntelliBI_Batch_Coordinator_Daily_Attendance_Report_
+            IntelliBI_Coordinator_Task_List_Report_Daily_
             12-Sep-2026_10.00_AM_-_12-Sep-2026_03.00_PM
-        <parent>/Weekly Coordinator Reports/Weekly 07-Sep-2026 to 13-Sep-2026/ …
+        <parent>/Weekly Coordinator Reports/Weekly 07-Sep-2026 to 13-Sep-2026/
+            IntelliBI_Coordinator_Task_List_Report_Weekly_<period> …
         <parent>/Monthly Coordinator Reports/Monthly Sep-2026/ …
         <parent>/Manual Coordinator Reports/Manual 01-Sep-2026 to 15-Sep-2026/ …
     Re-running the same report saves the next "- Version N"; earlier versions
@@ -118,10 +121,35 @@ log = logging.getLogger("CoordinatorTaskList")
 # =============================================================================
 PARENT_FOLDER_ID  = "1BEokUc7Np7iBVSMwIyMAgZUa0mrecT-h"   # coordinator Drive folder
 IMPERSONATE_USER  = "info@intellibiinnovationstechnologies.in"
-# File / native-sheet base name. The report period ("duration" — the daily
-# time-range label, same style as pyAttendaceFeedbackReport.py) is appended, e.g.
-#   IntelliBI_Batch_Coordinator_Daily_Attendance_Report_12-Sep-2026_10.00_AM_-_12-Sep-2026_03.00_PM
-REPORT_BASENAME   = "IntelliBI_Batch_Coordinator_Daily_Attendance_Report"
+# Report name: "<Type> Coordinator Task List Report" (Type = Daily / Weekly /
+# Monthly / Manual) — e-mail subject and heading, sheet title bands, logs.
+REPORT_NAME       = "Coordinator Task List Report"
+# File / native-sheet base name = IntelliBI_Coordinator_Task_List_Report_<Type>,
+# then the report period ("duration" — the daily time-range label, same style as
+# pyAttendaceFeedbackReport.py), e.g.
+#   IntelliBI_Coordinator_Task_List_Report_Daily_12-Sep-2026_10.00_AM_-_12-Sep-2026_03.00_PM
+#   IntelliBI_Coordinator_Task_List_Report_Weekly_21_Sep_to_27_Sep_2026
+FILE_BASENAME     = "IntelliBI_Coordinator_Task_List_Report"
+REPORT_BASENAME   = f"{FILE_BASENAME}_Daily"
+# Names used before 09-Oct-2026 ("Batch Coordinator"). Still recognised so the
+# "- Version N" numbering of a day / period continues across the rename and the
+# Task Performance report keeps reading every earlier daily task list.
+LEGACY_REPORT_BASENAME = "IntelliBI_Batch_Coordinator_Daily_Attendance_Report"
+TASK_LIST_BASENAMES    = (REPORT_BASENAME, LEGACY_REPORT_BASENAME)
+
+
+def report_display_name(kind: str) -> str:
+    """'Daily Coordinator Task List Report', 'Weekly Coordinator Task List Report' …"""
+    return f"{str(kind).strip().title()} {REPORT_NAME}"
+
+
+def period_basenames(report_type: str):
+    """(current, legacy) Drive base names of a Weekly / Monthly / Manual roll-up."""
+    t = str(report_type).strip().title()
+    return f"{FILE_BASENAME}_{t}", f"IntelliBI_Batch_Coordinator_{t}_Follow_Ups"
+
+
+DAILY_REPORT_NAME = report_display_name("Daily")
 VERBOSE           = True
 
 # ── Google Sheet access & protection (applied to every sheet this script uploads) ─
@@ -315,7 +343,7 @@ _ADMC = {h: i + 1 for i, h in enumerate(ADM_COLS)}   # 1-based column index by h
 # =============================================================================
 #  REPORT DESIGN SYSTEM  (presentation only — one visual language for every tab)
 #  ---------------------------------------------------------------------------
-#  Every tab of the Batch Coordinator report is laid out the same way so the
+#  Every tab of the Coordinator Task List report is laid out the same way so the
 #  coordinator can read any row left → right as:
 #        WHO / WHAT is affected  →  the numbers behind the flag  →  WHY FLAGGED
 #  and, inside "Why Flagged", each reason as   issue: figures   →  ACTION.
@@ -437,11 +465,13 @@ def ds_zebra(i):
     return AR.C_WHITE if i % 2 == 0 else DS_ZEBRA
 
 
-def ds_title(ws, ncols, tab_purpose, period_label, guide_text):
-    """Rows 1–2: title band + guide strip. Returns the next free row (3)."""
+def ds_title(ws, ncols, tab_purpose, period_label, guide_text, report_name="Batch Coordinator"):
+    """Rows 1–2: title band + guide strip. Returns the next free row (3).
+    report_name = the name in the title band (this report passes
+    report_display_name(<type>); the default keeps other callers' titles)."""
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncols)
     c = ws.cell(row=1, column=1)
-    c.value = f"  IntelliBI  |  Batch Coordinator — {tab_purpose}  |  {period_label}"
+    c.value = f"  IntelliBI  |  {report_name} — {tab_purpose}  |  {period_label}"
     c.font = AR._font(bold=True, size=13, color=AR.C_WHITE)
     c.fill = AR._fill(DS_NAV)
     c.alignment = AR._align("left", "center")
@@ -1411,8 +1441,8 @@ def build_instructor_followups(ws, sess_daily, att_daily, fb_daily, tf_daily,
     headers, priority chip on Tech Name, semantic tints only on status/measure
     cells, numbered Why-Flagged reasons with the action on its own line)."""
     period = period_label or report_date.strftime('%d-%b-%Y')
-    ds_title(ws, IN, "Instructor Follow-Ups", period,
-             "One row per session that needs a coordinator touch. Priority chip on Tech Name: "
+    ds_title(ws, IN, "Instructor Follow-Ups", period, report_name=DAILY_REPORT_NAME,
+             guide_text="One row per session that needs a coordinator touch. Priority chip on Tech Name: "
              "High = call the instructor, Medium = message / remind.   "
              "Colour key: ■ High = red  ■ Medium = amber  ■ Info = blue  ■ OK = green."
              + DS_GUIDE_FOLLOWUP)
@@ -1601,8 +1631,8 @@ def build_assignment_followups(ws, by_tech, report_date, period_label=None):
     sub-banner, '#' cell = priority chip (Missed / Final = High, 2nd = Medium,
     1st = Info), Reminder stage as a chip, neutral zebra rows."""
     period = period_label or report_date.strftime('%d-%b-%Y')
-    ds_title(ws, AFN, "Learner Assignment Follow-Ups", period,
-             "Learners with a pending assignment submission, grouped by technology (blue banner: "
+    ds_title(ws, AFN, "Learner Assignment Follow-Ups", period, report_name=DAILY_REPORT_NAME,
+             guide_text="Learners with a pending assignment submission, grouped by technology (blue banner: "
              "Tech Name · Duration · pending count) and assignment (pale banner). "
              "Priority chip on '#': High = deadline missed / final day, Medium = 2nd reminder, "
              "Info = 1st reminder.   Colour key: ■ High = red  ■ Medium = amber  ■ Info = blue."
@@ -1813,8 +1843,8 @@ def build_admission_formalities(ws, rows, report_date, period_label=None):
     report's own classification), Recipient Status as a chip, expiry date bold red
     when live, neutral zebra rows, numbered Why Flagged with the action line."""
     period = period_label or report_date.strftime('%d-%b-%Y')
-    ds_title(ws, ADMN, "Learner Admission Formalities", period,
-             "Learners whose admission form / e-signature is still pending, most urgent first. "
+    ds_title(ws, ADMN, "Learner Admission Formalities", period, report_name=DAILY_REPORT_NAME,
+             guide_text="Learners whose admission form / e-signature is still pending, most urgent first. "
              "Priority chip on Student Name: High = form not sent, expired or declined; "
              "Medium = sent but not opened; Info = other pending.   "
              "Colour key: ■ High = red  ■ Medium = amber  ■ Info = blue." + DS_GUIDE_FOLLOWUP)
@@ -2171,8 +2201,8 @@ def build_wise_validation(ws, data, report_date, period_label=None, interview_ro
                   "Interview Consolidate Sheet")
     period = period_label or report_date.strftime('%d-%b-%Y')
     NTOT = NMAX + len(FOLLOWUP_COLS)
-    ds_title(ws, NTOT, "Wise & Interview Feedback Validation", period,
-             "Data-quality checks in Wise (student / course / instructor records) plus interviews "
+    ds_title(ws, NTOT, "Wise & Interview Feedback Validation", period, report_name=DAILY_REPORT_NAME,
+             guide_text="Data-quality checks in Wise (student / course / instructor records) plus interviews "
              "without feedback. Priority chip on the first cell: High = Invalid value, "
              "Medium = Missing value, Info = Warning.   Colour key: ■ High = red  ■ Medium = amber  "
              "■ Info = blue  ■ Valid = green." + DS_GUIDE_FOLLOWUP)
@@ -2242,8 +2272,8 @@ def build_student_detail_ext(ws, att_daily: pd.DataFrame, susp_daily: pd.DataFra
     tints only on status & measure cells, and a numbered Why Flagged with the
     action on its own line."""
     period = period_label or report_date.strftime('%d-%b-%Y')
-    ds_title(ws, N, "Learner Attendance Follow-Ups", period,
-             "One row per learner who needs a follow-up today, grouped by technology (the blue "
+    ds_title(ws, N, "Learner Attendance Follow-Ups", period, report_name=DAILY_REPORT_NAME,
+             guide_text="One row per learner who needs a follow-up today, grouped by technology (the blue "
              "banner names the Tech / Duration and how many learners are pending); Rank 1 = "
              "most urgent within the technology (chip: High = rank 1–3, Medium = 4–6, Info = others). "
              "Peach rows = yesterday's session.   Colour key: ■ High = red  ■ Medium = amber  "
@@ -2493,7 +2523,8 @@ def _list_children(drive, parent_id, folders_only=False):
             return out
 
 
-def upload_report(folder_name, filename: str, buf: io.BytesIO, base_prefix: str) -> str:
+def upload_report(folder_name, filename: str, buf: io.BytesIO, base_prefix: str,
+                  legacy_prefixes=()) -> str:
     """Create <parent>/<folder_name>/ and drop the workbook there as a native
     Google Sheet (converted on upload). `folder_name` is one folder name or a
     sequence of nested names — the Coordinator layout passes
@@ -2506,7 +2537,9 @@ def upload_report(folder_name, filename: str, buf: io.BytesIO, base_prefix: str)
         already exists -> "<name> - Version 2"
         Version 2 too  -> "<name> - Version 3"  (increments dynamically)
     Every previous version is kept unchanged. base_prefix scopes this per report
-    type, so each type versions independently and other reports are untouched."""
+    type, so each type versions independently and other reports are untouched.
+    legacy_prefixes = earlier base names of the same report: files saved under
+    them count too, so the numbering continues across a rename."""
     import re
     from googleapiclient.http import MediaIoBaseUpload
 
@@ -2515,10 +2548,12 @@ def upload_report(folder_name, filename: str, buf: io.BytesIO, base_prefix: str)
     folder_id = CP.resolve_folder(drive, PARENT_FOLDER_ID, names, _find_or_create_folder)
     folder_name = "/".join(names)
     drive_name = filename[:-5] if filename.lower().endswith(".xlsx") else filename
-    base = base_prefix.replace("'", "\\'")
-    q = f"'{folder_id}' in parents and name contains '{base}' and trashed=false"
-    existing = drive.files().list(q=q, fields="files(id,name)", supportsAllDrives=True,
-                                  includeItemsFromAllDrives=True).execute().get("files", [])
+    existing = []
+    for prefix in (base_prefix,) + tuple(p for p in legacy_prefixes if p and p != base_prefix):
+        base = prefix.replace("'", "\\'")
+        q = f"'{folder_id}' in parents and name contains '{base}' and trashed=false"
+        existing += drive.files().list(q=q, fields="files(id,name)", supportsAllDrives=True,
+                                       includeItemsFromAllDrives=True).execute().get("files", [])
 
     # Do NOT delete/replace any existing report — preserve every version. If one
     # already exists for this report type in this folder, name the new run as the
@@ -2761,7 +2796,7 @@ def upload_datewise(report_date: date, filename: str, buf: io.BytesIO) -> str:
     """Daily report → <parent>/Daily Coordinator Reports/Daily DD-Mon-YYYY/
     (the shared Coordinator layout; thin wrapper over upload_report)."""
     return upload_report(CP.folder_path("Daily", report_date, report_date),
-                         filename, buf, REPORT_BASENAME)
+                         filename, buf, REPORT_BASENAME, legacy_prefixes=(LEGACY_REPORT_BASENAME,))
 
 
 # =============================================================================
@@ -2802,10 +2837,12 @@ def _session_metrics(sess, att_period, fb_period, tf_ids):
                 fb_given=fb_given, flagged=flagged)
 
 
-def build_learner_followups_period(ws, att_period, fb_period, agg_map, start, end, label):
+def build_learner_followups_period(ws, att_period, fb_period, agg_map, start, end, label,
+                                   report_name=None):
     """One row per (student, tech) flagged on >=1 day in the period, with the
     count of Attendance / Feedback / Low-Rating days and till-date aggregate."""
     ds_title(ws, LPN, "Learner Attendance Follow-Ups (period roll-up)", label,
+             report_name=report_name or REPORT_NAME, guide_text=
              "One row per learner flagged on at least one day in the period; Rank 1 = most urgent "
              "within the technology (chip: High = rank 1–3, Medium = 4–6, Info = others).   "
              "Colour key: ■ High = red  ■ Medium = amber  ■ Info = blue  ■ OK = green.")
@@ -2959,10 +2996,11 @@ def build_learner_followups_period(ws, att_period, fb_period, agg_map, start, en
 
 
 def build_instructor_followups_period(ws, sess_period, att_period, fb_period, tf_period,
-                                      instr_phones, label):
+                                      instr_phones, label, report_name=None):
     """One row per (instructor, tech) over the period: session counts, missing
     feedback, avg attendance/rating, flagged-session count, avg schedule diff."""
     ds_title(ws, IPN, "Instructor Follow-Ups (period roll-up)", label,
+             report_name=report_name or REPORT_NAME, guide_text=
              "One row per instructor and technology with at least one missing feedback or flagged "
              "session in the period. Priority chip on Tech Name: High = feedback missing in more "
              "than half the sessions or sessions running short, Medium = otherwise.   "
@@ -3096,23 +3134,26 @@ def _generate_period(service, report_type, start, end, plabel,
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
+    rname = report_display_name(report_type)
     build_learner_followups_period(wb.create_sheet("Learner Attendance Follow-Ups"),
-                                   att_p, fb_p, agg_map, start, end, plabel)
+                                   att_p, fb_p, agg_map, start, end, plabel, report_name=rname)
     build_instructor_followups_period(wb.create_sheet("Instructor Follow-Ups"),
-                                      sess_p, att_p, fb_p, tf_p, instr_phones, plabel)
+                                      sess_p, att_p, fb_p, tf_p, instr_phones, plabel,
+                                      report_name=rname)
     buf = io.BytesIO()
     wb.save(buf)
 
-    base = f"IntelliBI_Batch_Coordinator_{report_type.title()}_Follow_Ups"
+    base, legacy_base = period_basenames(report_type)
     safe = plabel.replace(" ", "_").replace("–", "to").replace("/", "-").replace(":", ".")
     filename = f"{base}_{safe}.xlsx"
     # Save Weekly / Monthly / Manual roll-ups in the shared Coordinator layout:
     # <parent>/<Type> Coordinator Reports/<reporting-period folder>/ — the same
-    # folder the Task Performance report for this type + period uses. File name
-    # is unchanged; the per-report base_prefix keeps versioning per report type.
+    # folder the Task Performance report for this type + period uses. The
+    # per-report base_prefix keeps versioning per report type (and continues the
+    # numbering of a period first saved under the earlier name).
     folder = CP.folder_path(report_type.title(), start, end)
-    link = upload_report(folder, filename, buf, base)
-    print(f"\n{'='*64}\n  Batch Coordinator {report_type.title()} Follow-Ups — {plabel}")
+    link = upload_report(folder, filename, buf, base, legacy_prefixes=(legacy_base,))
+    print(f"\n{'='*64}\n  {rname} — {plabel}")
     print(f"  Period sessions: {0 if sess_p is None else len(sess_p)} | Agg groups: {len(agg_map)}")
     print(f"  Link: {link}\n{'='*64}\n")
     return {"link": link, "report_type": report_type, "period": plabel,
@@ -3734,8 +3775,8 @@ def build_interview_reminders(ws, sheets, drive, service, att_agg,
     today's action (MESSAGE / CALL), interviewer row = bold Info row, learners as
     neutral zebra rows, Interview Time cell = priority chip."""
     period = period_label or report_date.strftime('%d-%b-%Y')
-    ds_title(ws, IVN, "Learner & Instructor Interview Reminders", period,
-             "Interviews that need a reminder today: MESSAGE two days before, CALL one day before. "
+    ds_title(ws, IVN, "Learner & Instructor Interview Reminders", period, report_name=DAILY_REPORT_NAME,
+             guide_text="Interviews that need a reminder today: MESSAGE two days before, CALL one day before. "
              "The interviewer row comes first in each group, then the candidates by time. "
              "Priority chip on Interview Time: Medium = call today, Info = message today."
              + DS_GUIDE_FOLLOWUP)
@@ -3917,7 +3958,7 @@ def _generate_daily(service, report_date, sess_agg, att_agg, fb_agg, tf_agg, sus
     # ── upload date-wise as a native Google Sheet ─────────────────────────────
     link = upload_datewise(report_date, filename, buf)
     n_daily = 0 if att_daily is None else len(att_daily)
-    print(f"\n{'='*64}\n  Batch Coordinator Daily Attendance — {report_date}")
+    print(f"\n{'='*64}\n  {DAILY_REPORT_NAME} — {report_date}")
     print(f"  Daily rows: {n_daily} | Aggregate groups: {len(agg_map)}")
     print(f"  Link: {link}\n{'='*64}\n")
     return {"link": link, "report_date": report_date.isoformat(),
@@ -4083,7 +4124,7 @@ def email_results(results):
             label = datetime.strptime(r["report_date"], "%Y-%m-%d").strftime("%d-%b-%Y")
             body = CE.batch_coordinator_html(kind, label, r.get("link"), r.get("task_counts"),
                                              today_label=AR._ist_today().strftime("%d-%b-%Y"))
-        ok = CE.send(f"{kind} Batch Coordinator Report - {label}", body,
+        ok = CE.send(f"{report_display_name(kind)} - {label}", body,
                      EMAIL_RECIPIENTS, sender=EMAIL_SENDER, star=STAR_EMAIL_IN_GMAIL) and ok
     return ok
 

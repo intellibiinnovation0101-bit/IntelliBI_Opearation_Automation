@@ -47,7 +47,7 @@ TITLES = {
     "pyAdmissionFormalitiesReport": "Admission Formalities Report",
     "pyStudentAdditionalNote": "Student Additional Note",
     "pyWiseDataValidationReport": "Wise Data Validation Report",
-    "pyCoordinatorTaskListReport": "Batch Coordinator Report",
+    "pyCoordinatorTaskListReport": "Coordinator Task List Report",
     # ── Operations — Evening batch ──────────────────────────────────────────
     "pyCoordinatorTaskPerformanceReport": "Coordinator Task Performance",
     # ── Sales ───────────────────────────────────────────────────────────────

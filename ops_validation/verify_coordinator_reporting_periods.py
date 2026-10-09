@@ -351,7 +351,7 @@ os.chdir(_cwd)
 check("both jobs delivered", [r.get("failed", False) for r in res], [False, False])
 check("Daily 22-Sep folder: task report + performance report together",
       [p.split("/")[-1].split("_2")[0] for p in drive.files_in("Daily Coordinator Reports", "Daily 22-Sep-2026")],
-      ["IntelliBI_Batch_Coordinator_Daily_Attendance_Report", "IntelliBI_Coordinator_Task_Performance_Report_Daily"])
+      ["IntelliBI_Coordinator_Task_List_Report_Daily", "IntelliBI_Coordinator_Task_Performance_Report_Daily"])
 check("Weekly folder: Batch Coordinator weekly roll-up + weekly performance report together",
       drive.files_in(*_wk),
       sorted(["/".join(_wk) + "/IntelliBI_Batch_Coordinator_Weekly_Follow_Ups_21_Sep_to_27_Sep_2026",
@@ -381,6 +381,37 @@ def _boom(folders, name, buf):
 res3 = P.run_jobs(jobs, P.discover_report_versions(drive, [(D1, D2)]), loader, now, upload=_boom)
 check("failed job recorded, other job still delivered", [bool(r.get("failed")) for r in res3], [True, False])
 
+print("\n== 5b. Rename to 'Coordinator Task List Report' (09-Oct-2026) ==")
+D3 = date(2026, 9, 23)
+drive.clock = datetime(2026, 9, 23, 3, 0)
+BC.upload_report(CP.folder_path("Daily", D3, D3),
+                 f"{BC.LEGACY_REPORT_BASENAME}_22-Sep-2026_12.00_PM_-_23-Sep-2026_09.30_AM.xlsx",
+                 task_report(D3, ["Farah S"]), BC.LEGACY_REPORT_BASENAME)        # saved before the rename
+bc_upload_daily(D3, ["Farah S", "Gita P"], clock_utc=datetime(2026, 9, 23, 6, 0))   # after the rename
+check("same day re-run after the rename: new name, numbering continues (Version 2)",
+      [p.split("/")[-1] for p in drive.files_in("Daily Coordinator Reports", "Daily 23-Sep-2026")],
+      sorted([f"{BC.LEGACY_REPORT_BASENAME}_22-Sep-2026_12.00_PM_-_23-Sep-2026_09.30_AM",
+              f"{BC.REPORT_BASENAME}_22-Sep-2026_12.00_PM_-_23-Sep-2026_09.30_AM - Version 2"]))
+check("performance report reads task lists under BOTH names (old history kept)",
+      sorted((v["name"].split("_22-Sep")[0], v["version"]) for v in P.discover_report_versions(drive, [(D3, D3)])),
+      sorted([(BC.REPORT_BASENAME, 2), (BC.LEGACY_REPORT_BASENAME, 1)]))
+check("names: <Type> Coordinator Task List Report / IntelliBI_Coordinator_Task_List_Report_<Type>_…",
+      (BC.report_display_name("Daily"), BC.report_display_name("weekly"), BC.REPORT_BASENAME,
+       BC.period_basenames("monthly"), BC.period_basenames("Manual")[0]),
+      ("Daily Coordinator Task List Report", "Weekly Coordinator Task List Report",
+       "IntelliBI_Coordinator_Task_List_Report_Daily",
+       ("IntelliBI_Coordinator_Task_List_Report_Monthly", "IntelliBI_Batch_Coordinator_Monthly_Follow_Ups"),
+       "IntelliBI_Coordinator_Task_List_Report_Manual"))
+_wk2 = CP.folder_path("Weekly", date(2026, 9, 28), date(2026, 10, 4))
+BC.upload_report(_wk2, "IntelliBI_Batch_Coordinator_Weekly_Follow_Ups_28_Sep_to_04_Oct_2026.xlsx",
+                 io.BytesIO(b"x"), "IntelliBI_Batch_Coordinator_Weekly_Follow_Ups")
+_b, _l = BC.period_basenames("weekly")
+BC.upload_report(_wk2, f"{_b}_28_Sep_to_04_Oct_2026.xlsx", io.BytesIO(b"x"), _b, legacy_prefixes=(_l,))
+check("period roll-up re-run after the rename: new name, Version 2",
+      [p.split("/")[-1] for p in drive.files_in(*_wk2)],
+      ["IntelliBI_Batch_Coordinator_Weekly_Follow_Ups_28_Sep_to_04_Oct_2026",
+       "IntelliBI_Coordinator_Task_List_Report_Weekly_28_Sep_to_04_Oct_2026 - Version 2"])
+
 print("\n== 6. Legacy migration classifier ==")
 check("legacy daily file -> Daily folder",
       CP.classify_legacy_file(f"{BC.REPORT_BASENAME}_x - Version 3", date(2026, 9, 30)),
@@ -388,6 +419,10 @@ check("legacy daily file -> Daily folder",
 check("legacy monthly roll-up -> Monthly folder",
       CP.classify_legacy_file("IntelliBI_Batch_Coordinator_Monthly_Follow_Ups_September_2026 - Version 8", None),
       ("Monthly", date(2026, 9, 1), date(2026, 9, 30)))
+check("new-name daily / period files classified the same way",
+      (CP.classify_legacy_file(f"{BC.REPORT_BASENAME}_x - Version 2", date(2026, 10, 9)),
+       CP.classify_legacy_file("IntelliBI_Coordinator_Task_List_Report_Monthly_September_2026", None)),
+      (("Daily", date(2026, 10, 9), date(2026, 10, 9)), ("Monthly", date(2026, 9, 1), date(2026, 9, 30))))
 check("unrelated files stay put",
       CP.classify_legacy_file("Coordinator Attendance Tasks — 2026-09-30", date(2026, 9, 30)), None)
 

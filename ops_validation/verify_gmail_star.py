@@ -329,8 +329,8 @@ BOX.reset(visible_after=2)
 r1 = BC.generate()
 check("every Batch Coordinator report e-mail sent and Starred",
       (len(SENT), starred()),
-      (2, ["Daily Batch Coordinator Report - 05-Oct-2026",
-           "Weekly Batch Coordinator Report - 28 Sep – 04 Oct 2026"]))
+      (2, ["Daily Coordinator Task List Report - 05-Oct-2026",
+           "Weekly Coordinator Task List Report - 28 Sep – 04 Oct 2026"]))
 BC.STAR_EMAIL_IN_GMAIL = False
 SENT.clear()
 BOX.reset()

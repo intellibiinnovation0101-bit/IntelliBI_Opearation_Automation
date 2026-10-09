@@ -5,7 +5,7 @@ These report e-mails are starred automatically once they are sent:
 | Project | Script | Subject |
 |---|---|---|
 | Operations | `co-ordinator reports/pyCoordinatorTaskPerformanceReport.py` | `<Type> Coordinator Task Performance Report - <period>` |
-| Operations | `co-ordinator reports/pyCoordinatorTaskListReport.py` | `<Type> Batch Coordinator Report - <period>` |
+| Operations | `co-ordinator reports/pyCoordinatorTaskListReport.py` | `<Type> Coordinator Task List Report - <period>` (before 09-Oct-2026: `<Type> Batch Coordinator Report - <period>`) |
 | Operations | `ops_reports_action/pyAssignmentSubmissionPerformanceReport.py` | `<Type> Assignment Submission Report - <period>` (one e-mail per Daily / Weekly / Monthly / Manual period, linking both the Performance and the Non-Submission report) |
 | Operations | `ops_reports_action/pyAttendaceFeedbackReport.py` | `IntelliBI <Type> Attendance & Feedback Report — <period>` |
 | Operations | `ops_reports_action/pyAssignmentSubmissionEmailReminder.py` | the staff summary `[IntelliBI] Reminder Run — <date> • n/m sent`. The individual student reminder e-mails are not starred, because info@ does not receive them. |
@@ -25,7 +25,7 @@ A star belongs to **one mailbox**. The sending account can star its own copy. No
 
 1. In Gmail, open the search-options arrow in the search bar.
 2. **From:** `info@intellibiinnovationstechnologies.in`
-3. **Subject:** `"Coordinator Task Performance Report" OR "Batch Coordinator Report" OR "Assignment Submission Report" OR "Attendance & Feedback Report" OR "Reminder Run" OR "Lead Report" OR "Lead Follow-Up Analysis Report"`
+3. **Subject:** `"Coordinator Task Performance Report" OR "Coordinator Task List Report" OR "Batch Coordinator Report" OR "Assignment Submission Report" OR "Attendance & Feedback Report" OR "Reminder Run" OR "Lead Report" OR "Lead Follow-Up Analysis Report"`
 4. Click **Create filter**, tick **Star it** (optionally also **Never send it to Spam**), and click **Create filter**.
 
 ## One-time requirement
